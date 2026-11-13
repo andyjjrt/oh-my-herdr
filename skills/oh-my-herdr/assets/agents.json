@@ -1,0 +1,11 @@
+{
+  "_comment": [
+    "How oh-my-herdr launches each agent type. Profiles reference these by name via \"agent\".",
+    "Override or add entries under \"agents\" in config.json (same shape).",
+    "launch = \"herdr-kind\": `herdr agent start <name> --kind <kind> --pane <pane> -- <args>` (herdr runs its canonical binary).",
+    "launch = \"command\":    runs <command> <args> in the pane with HERDR_AGENT=<detect_as>, waits until herdr detects the agent, then names it.",
+    "                         Use this for forks/wrappers whose executable herdr doesn't know (e.g. senpi, a pi fork)."
+  ],
+  "claude":   { "launch": "herdr-kind", "kind": "claude",   "bin": "claude" },
+  "senpi":    { "launch": "command",    "command": ["senpi"], "detect_as": "pi", "bin": "senpi" }
+}

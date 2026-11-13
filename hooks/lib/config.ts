@@ -1,0 +1,152 @@
+// config.json and agents.json: types, normalization (pure) and loading (through `$`).
+// Search order: $OMH_CONFIG → <project>/.omh/config.json → ~/.config/oh-my-herdr/config.json →
+// the plugin's skills/oh-my-herdr/assets/config.default.json.
+
+import type { Engine } from './engine'
+
+export type Profile = { agent: string; family: string; args: string[]; quota?: string | null }
+
+export type DiagnoseRules = Partial<Record<string, string[]>>
+
+export type AgentSpec = {
+  name: string
+  launch: 'herdr-kind' | 'command'
+  kind?: string
+  command?: string[]
+  detect_as?: string
+  env?: Record<string, string>
+  bin: string
+  stall_seconds?: number
+  diagnose?: DiagnoseRules
+}
+
+export type Category = { profiles: string[]; preamble: string | null }
+
+export type QuotaConfig = {
+  enabled: boolean
+  threshold: number
+  cacheSeconds: number
+  onUnknown: 'allow' | 'block'
+  providers: Record<string, { enabled?: boolean }>
+}
+
+export type Config = {
+  file: string
+  dir: string
+  lead: string | null
+  maxConcurrent: number
+  quota: QuotaConfig
+  profiles: Record<string, Profile>
+  categories: Record<string, Category>
+  agents: Record<string, AgentSpec>
+}
+
+type Json = Record<string, unknown>
+
+const asRecord = (v: unknown): Json => (v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Json) : {})
+const asStrings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : typeof v === 'string' ? [v] : [])
+
+export function normalizeCategory(raw: unknown): Category {
+  if (typeof raw === 'string' || Array.isArray(raw)) return { profiles: asStrings(raw), preamble: null }
+  const r = asRecord(raw)
+  return { profiles: asStrings(r.profiles), preamble: typeof r.preamble === 'string' ? r.preamble : null }
+}
+
+export function normalizeAgent(name: string, raw: unknown): AgentSpec {
+  const r = asRecord(raw)
+  const launch = r.launch === 'command' ? 'command' : 'herdr-kind'
+  const command = asStrings(r.command)
+  const kind = typeof r.kind === 'string' ? r.kind : undefined
+  return {
+    name,
+    launch,
+    ...(kind !== undefined && { kind }),
+    ...(command.length > 0 && { command }),
+    ...(typeof r.detect_as === 'string' && { detect_as: r.detect_as }),
+    ...(r.env !== undefined && { env: asRecord(r.env) as Record<string, string> }),
+    bin: typeof r.bin === 'string' ? r.bin : (command[0] ?? kind ?? name),
+    ...(typeof r.stall_seconds === 'number' && { stall_seconds: r.stall_seconds }),
+    ...(r.diagnose !== undefined && { diagnose: asRecord(r.diagnose) as DiagnoseRules }),
+  }
+}
+
+export function normalizeConfig(file: string, raw: unknown, builtinAgents: unknown): Config {
+  const r = asRecord(raw)
+  const q = asRecord(r.quota)
+  const profiles: Record<string, Profile> = {}
+  for (const [name, p] of Object.entries(asRecord(r.profiles))) {
+    const pr = asRecord(p)
+    const agent = typeof pr.agent === 'string' ? pr.agent : typeof pr.kind === 'string' ? pr.kind : ''
+    profiles[name] = {
+      agent,
+      family: typeof pr.family === 'string' ? pr.family : 'unknown',
+      args: asStrings(pr.args),
+      ...('quota' in pr && { quota: typeof pr.quota === 'string' ? pr.quota : null }),
+    }
+  }
+  const categories: Record<string, Category> = {}
+  for (const [name, c] of Object.entries(asRecord(r.categories))) categories[name] = normalizeCategory(c)
+  const agents: Record<string, AgentSpec> = {}
+  for (const [name, a] of Object.entries(asRecord(builtinAgents))) if (!name.startsWith('_')) agents[name] = normalizeAgent(name, a)
+  for (const [name, a] of Object.entries(asRecord(r.agents))) {
+    agents[name] = normalizeAgent(name, { ...asRecord(builtinAgents)[name] as Json, ...asRecord(a) })
+  }
+  return {
+    file,
+    dir: file.slice(0, file.lastIndexOf('/')),
+    lead: typeof r.lead === 'string' ? r.lead : null,
+    maxConcurrent: typeof r.max_concurrent === 'number' ? r.max_concurrent : 0,
+    quota: {
+      enabled: q.enabled !== false,
+      threshold: typeof q.threshold === 'number' ? q.threshold : 95,
+      cacheSeconds: typeof q.cache_seconds === 'number' ? q.cache_seconds : 120,
+      onUnknown: q.on_unknown === 'block' ? 'block' : 'allow',
+      providers: asRecord(q.providers) as QuotaConfig['providers'],
+    },
+    profiles,
+    categories,
+    agents,
+  }
+}
+
+/** Problems that make a config unusable or a category misroute; empty when fine. */
+export function configProblems(cfg: Config): string[] {
+  const out: string[] = []
+  for (const [name, p] of Object.entries(cfg.profiles)) {
+    if (!p.agent) out.push(`profile '${name}' has no "agent"`)
+    else if (!cfg.agents[p.agent]) out.push(`profile '${name}' uses unknown agent '${p.agent}'`)
+  }
+  for (const [name, c] of Object.entries(cfg.categories)) {
+    if (c.profiles.length === 0) out.push(`category '${name}' lists no profiles`)
+    for (const p of c.profiles) if (!cfg.profiles[p]) out.push(`category '${name}' lists undefined profile '${p}'`)
+  }
+  if (cfg.lead !== null && !cfg.profiles[cfg.lead]) out.push(`lead profile '${cfg.lead}' is not defined`)
+  return out
+}
+
+export async function configCandidates($: Engine, omhDir: string): Promise<string[]> {
+  const home = (await $.env.get('HOME')) ?? ''
+  const xdg = (await $.env.get('XDG_CONFIG_HOME')) ?? `${home}/.config`
+  const explicit = await $.env.get('OMH_CONFIG')
+  return [
+    ...(explicit ? [explicit] : []),
+    `${omhDir}/config.json`,
+    `${xdg}/oh-my-herdr/config.json`,
+    `${$.plugin.root}/skills/oh-my-herdr/assets/config.default.json`,
+  ]
+}
+
+export async function loadConfig($: Engine, omhDir: string): Promise<Config> {
+  const builtin = JSON.parse(await $.fs.read(`${$.plugin.root}/skills/oh-my-herdr/assets/agents.json`)) as unknown
+  for (const file of await configCandidates($, omhDir)) {
+    if (!(await $.fs.exists(file))) continue
+    let raw: unknown
+    try {
+      raw = JSON.parse(await $.fs.read(file))
+    } catch (err) {
+      throw new Error(`invalid JSON in ${file}: ${(err as Error).message}`)
+    }
+    return normalizeConfig(file, raw, builtin)
+  }
+  throw new Error('no config.json found')
+}

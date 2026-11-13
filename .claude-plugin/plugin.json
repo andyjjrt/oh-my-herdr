@@ -1,0 +1,48 @@
+{
+  "name": "oh-my-herdr",
+  "version": "0.1.0",
+  "description": "OmO-style multi-agent orchestration on herdr: Claude Code leads, worker agents run in herdr panes. Also a compact status line.",
+  "author": {
+    "name": "andyjjrt"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "band": {
+      "type": "boolean",
+      "title": "Wave band",
+      "description": "Show the current wave's progress bar above the prompt.",
+      "default": true
+    },
+    "statusbar": {
+      "type": "boolean",
+      "title": "Status line",
+      "description": "Turn the hint line under the prompt into one compact line: model (effort), folder and git branch, context bar, 5-hour/weekly usage. Works in every session, not only in herdr.",
+      "default": true
+    },
+    "wakeOnSettle": {
+      "type": "boolean",
+      "title": "Wake the lead",
+      "description": "Submit a prompt to the lead when a wave settles or a worker needs it, so it never waits in a turn.",
+      "default": true
+    },
+    "notifyHuman": {
+      "type": "boolean",
+      "title": "herdr notifications",
+      "description": "Show a herdr notification (with sound) when a worker is blocked or a wave settles.",
+      "default": true
+    },
+    "autoContinue": {
+      "type": "boolean",
+      "title": "Auto-continue",
+      "description": "When a turn ends with open tasks or gates and no worker busy, prompt the lead to keep going (Sisyphus mode).",
+      "default": false
+    },
+    "autoContinueMax": {
+      "type": "number",
+      "title": "Auto-continue limit",
+      "description": "Most auto-continue prompts in a row; any prompt you type resets the count.",
+      "default": 3
+    }
+  }
+}
