@@ -1,101 +1,115 @@
 # oh-my-herdr
 
-在 [herdr](https://herdr.dev) 上做 [OmO（oh-my-openagent）](https://omo.dev) 風格的多 agent、多模型分工的 Claude Code mod。
+Let Claude Code act as the **lead** and split a big job across several agents and models running in [herdr](https://herdr.dev) panes. Inspired by [OmO (oh-my-openagent)](https://omo.dev).
 
-Claude Code 當主控（lead）：規劃、分派、驗收。worker 是 herdr pane 裡的其他 agent（Claude Code，或跑 OpenCode Go 模型的 [senpi](https://github.com/code-yeongyu/senpi)），依每個 task 的意圖與類別挑選，派出前先查各訂閱的剩餘額度。
+In one line: **type `/ulw <goal>`, and the lead plans, dispatches, waits, and verifies — you just watch the progress bar.**
 
-```
-┌─ herdr ─────────────────────────────────────────────────────────┐
-│ [主控 pane] Claude Code          │ [omh-workers 分頁]            │
-│  /ulw <目標>                     │  w1-t1  senpi · DeepSeek      │
-│   ├ plan.json（waves + gates）   │  w1-t2  senpi · DeepSeek      │
-│   ├ omh_dispatch ───────────────►│  w2-r1  Claude · Opus（審查） │
-│   ├ 結束這一輪，等 mod 叫醒      │                               │
-│   └ omh_collect → 驗收 ◄─────────│  result.md                    │
-│ omh W1 ▓▓▓▓▓▓▓▓░░░░ 2/3 ⚠1       │                               │
-└─────────────────────────────────────────────────────────────────┘
-```
+## Quick start
 
-## 和直接用 herdr 有什麼不同
-
-- **輸入框上方一列 wave 進度條。** 目前這一波做完幾個、有幾個需要處理；`/omh board` 開完整看板（所有 wave、task、worker、額度）。
-- **worker 停下來時，主控知道為什麼。** mod 透過 herdr 的事件串流盯每個 worker；herdr 判斷不出來（卡住、沒開始、閒置卻沒交結果、pane 不見了）時，mod 讀畫面、結果檔和額度，判定是 `quota-exhausted`、`permission-prompt`、`config-error`、`crashed`、`interrupted` 還是 `unknown`，連同建議一起叫醒主控。
-- **派出前先做意圖分析。** 每次派工都要寫明 intent（explore / research / implement / fix / review / plan / write）、category 和理由，路由依 category 的 profile 順序挑出有額度的那個；審查自動避開實作者的模型家族。
-- **主控不用等。** 派完就結束這一輪；一波結束或有 worker 需要處理時，mod 會送訊息叫醒主控。mod 重新載入時，還沒送出的訊息也不會遺失。
-- **每個 task 留一句品質紀錄。** 驗收時主控寫一行品質評語，和 intent、profile、耗時一起記到 `~/.local/state/oh-my-herdr/history.jsonl`，之後用來評估哪個 profile 適合哪類工作。
-
-## 狀態列
-
-裝了這個 mod，輸入框下方那一列會換成精簡的狀態列。**每個 session 都有效**，不需要在 herdr 裡：
-
-```
-⏵⏵ auto mode on · Opus 5.5 (high) · ~/codes/github/oh-my-herdr  main · ███░░░░░░░ 31% · 68%/9%
-```
-
-依序是：
-- 模型與 effort（橘色，effort 灰色）
-- 資料夾（藍色）與 git branch（紫色）
-- context 用量條
-- Claude 訂閱的 5 小時／每週用量
-
-用量條和用量的顏色：綠色，70% 起轉黃，90% 起轉紅。
-
-- **字型：** branch icon 是 Nerd Font 的字元，沒有 Nerd Font 會顯示成方框。
-- **前面的 mode 標示：** 「⏵⏵ auto mode on」是 Claude Code 自己畫的，mod 無法改掉。
-- **更新時機：** session 開始時、每次回覆後、`/effort`、`/model`、compact 之後。
-- **關掉：** 在 `/plugin` 的 `statusbar` 選項。
-
-## 安裝
-
-需要 herdr、python3，以及登入過的 Claude Code。在 Claude Code 裡輸入：
+**1. Install.** You need [herdr](https://herdr.dev), python3, and a logged-in Claude Code. In Claude Code:
 
 ```
 /plugin install oh-my-herdr --marketplace andyjjrt/oh-my-herdr
 ```
 
-問到 `Add marketplace?` 時按 `y`，再選安裝範圍。
+Answer `y` to `Add marketplace?`, then pick an install scope.
 
-想用 OpenCode Go 的模型當 worker，再裝 senpi 並登入：
+**2. Open Claude Code inside herdr.** Start `herdr`, then run `claude` in a pane, in your project directory.
+
+**3. Check the setup once:**
+
+```
+/omh check
+```
+
+It shows the config in effect, the agents it needs, and each subscription's quota. Fix anything it flags.
+
+**4. Go:**
+
+```
+/ulw paginate the orders API and add tests
+```
+
+The lead explores, plans, and dispatches on its own. A progress bar appears above the prompt, and the lead is woken up whenever a wave finishes or a worker gets stuck — you don't have to babysit it.
+
+> Add `.omh/` to your project's `.gitignore`; each run's plan and results live there.
+
+### Optional: OpenCode Go models as workers
+
+Workers are Claude Code by default. To hand grunt work to cheaper models, install [senpi](https://github.com/code-yeongyu/senpi) and log in:
 
 ```sh
-bun add -g @code-yeongyu/senpi   # 或 npm install -g --ignore-scripts @code-yeongyu/senpi
-senpi                            # 在 senpi 裡 /login → OpenCode Go
+bun add -g @code-yeongyu/senpi   # or: npm install -g --ignore-scripts @code-yeongyu/senpi
+senpi                            # then /login → OpenCode Go
 ```
 
-詳細設定（herdr 整合、senpi 權限、設定檔格式、額度）見 [skills/oh-my-herdr/references/setup.md](skills/oh-my-herdr/references/setup.md)。
+Full setup (herdr integration, senpi permissions, config format, quota): [references/setup.md](skills/oh-my-herdr/references/setup.md).
 
-## 使用
+## Commands
 
-在 herdr 的 pane 裡、專案目錄下開 Claude Code（mod 只在 `HERDR_ENV=1` 的主控 pane 裡啟動，worker pane 裡不會），然後：
-
-```
-/ulw 把 orders API 改成分頁，補上測試
-```
-
-| 指令 | 作用 |
+| Command | What it does |
 | --- | --- |
-| `/ulw <目標>` | 開始一次 ultrawork：探索 → 規劃 waves → 派工 → 驗收 → gate |
-| `/omh board` | 開關完整看板 pane |
-| `/omh status` | 目前 run 的狀態 |
-| `/omh quota` | 各訂閱目前用量 |
-| `/omh check` | 檢查設定、需要的 agent、額度對應 |
-| `/omh teardown` | 關掉所有 worker |
+| `/ulw <goal>` | Start an ultrawork run: explore → plan waves → dispatch → verify → gate |
+| `/omh check` | Check the config, required agents, and quota mapping |
+| `/omh status` | State of the current run |
+| `/omh board` | Toggle the full board pane (every wave, task, worker, quota) |
+| `/omh quota` | Current usage of each subscription |
+| `/omh teardown` | Close all workers |
 
-主控使用的工具：`omh_dispatch`、`omh_status`（plan / show / verified / abandon / gate）、`omh_collect`、`omh_spawn`、`omh_teardown`。流程寫在 [skills/oh-my-herdr/SKILL.md](skills/oh-my-herdr/SKILL.md)。
+You can also just ask: "ulw", "split this across several agents", or "use herdr to parallelize this" loads the same workflow.
 
-run 的檔案放在專案的 `.omh/`，記得加進 `.gitignore`。
+## Bundled skills
 
-## 設定
+| Skill | Purpose |
+| --- | --- |
+| `oh-my-herdr` | The lead's full workflow: intent gate, wave planning, dispatch, verification, gates. `/ulw` uses it. |
+| `herdr` | herdr's official guide to panes, tabs, workspaces, agents, and safety rules. Used when you ask Claude directly to, say, "open a herdr pane and run the tests" or "check what the agent next door is doing". |
 
-設定檔依序找：`$OMH_CONFIG` → `<專案>/.omh/config.json` → `~/.config/oh-my-herdr/config.json` → 內建的 `skills/oh-my-herdr/assets/config.default.json`。
+The `herdr` skill is copied unmodified from [herdrdev/herdr](https://github.com/herdrdev/herdr/tree/master/skills/herdr) (Apache-2.0); see [skills/herdr/NOTICE.md](skills/herdr/NOTICE.md) for its source and how to update it. If you already installed it separately (`npx skills add herdrdev/herdr`), you can remove that copy so it doesn't load twice.
+
+## What it adds on top of herdr
+
+- **Visible progress.** A wave bar above the prompt shows how many tasks are done and how many need attention. `/omh board` opens the full board.
+- **The lead knows why a worker stopped.** The mod watches every worker through herdr's event stream. When one is stuck, never started, went idle without a result, or its pane vanished, it reads the screen, the result file and quota, classifies it as `quota-exhausted`, `permission-prompt`, `config-error`, `crashed`, `interrupted` or `unknown`, and wakes the lead with a suggestion.
+- **Model per task, quota first.** Every dispatch states an intent (explore / research / implement / fix / review / plan / write), a category and a reason; routing picks the first profile in that category whose provider still has quota. Reviews automatically avoid the implementer's model family.
+- **The lead never idles in a turn.** It ends its turn after dispatching; the mod wakes it when there's something to do. Pending wake-ups survive a mod reload.
+- **A quality log.** Each verified task gets a one-line quality note, stored with its intent, profile and duration in `~/.local/state/oh-my-herdr/history.jsonl`, for judging which profile suits which kind of work.
+
+## Status line
+
+The mod also replaces the hint line under the prompt with a compact status line. **It works in every session**, not only inside herdr:
+
+```
+⏵⏵ auto mode on · Opus 5.5 (high) · ~/codes/github/oh-my-herdr  main · ███░░░░░░░ 31% · 68%/9%
+```
+
+From left to right: model and effort, folder and git branch, context usage bar, and Claude subscription usage (5-hour / weekly). Usage is green, turns yellow at 70% and red at 90%.
+
+- The branch icon is a Nerd Font glyph; without a Nerd Font it shows as a box.
+- The leading "⏵⏵ auto mode on" is drawn by Claude Code itself; the mod can't change it.
+- It refreshes at session start, after each reply, after `/effort`, `/model`, and compaction.
+- To turn it off, disable `statusbar` in `/plugin`.
+
+## Configuration
+
+### Which agent / model each worker uses
+
+The first config file found wins:
+
+1. `$OMH_CONFIG`
+2. `<project>/.omh/config.json`
+3. `~/.config/oh-my-herdr/config.json`
+4. The built-in [config.default.json](skills/oh-my-herdr/assets/config.default.json)
 
 ```jsonc
 {
+  // A profile is one agent + model
   "profiles": {
     "claude-opus": { "agent": "claude", "family": "claude", "args": ["--model", "opus"] },
     "go-deepseek": { "agent": "senpi", "family": "deepseek",
                      "args": ["--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--thinking", "max"] }
   },
+  // A category lists profiles in order; the first with quota left wins
   "categories": {
     "deep":     ["go-deepseek", "claude-opus"],
     "reviewer": ["claude-opus"]
@@ -103,23 +117,44 @@ run 的檔案放在專案的 `.omh/`，記得加進 `.gitignore`。
 }
 ```
 
-mod 本身的選項（`/plugin` 裡設定）：
+### Mod options (set in `/plugin`)
 
-| 選項 | 預設 | 說明 |
+| Option | Default | Description |
 | --- | --- | --- |
-| `band` | 開 | 輸入框上方的 wave 進度條 |
-| `statusbar` | 開 | 輸入框下方的精簡狀態列（每個 session 都有效） |
-| `wakeOnSettle` | 開 | 一波結束或 worker 出狀況時叫醒主控 |
-| `notifyHuman` | 開 | 同時發 herdr 通知給你 |
-| `autoContinue` | 關 | run 還沒結束、也沒有 worker 在跑時，自動叫主控繼續 |
-| `autoContinueMax` | 3 | 自動繼續的上限（你自己輸入訊息就重新計算） |
+| `band` | on | Wave progress bar above the prompt |
+| `statusbar` | on | Compact status line under the prompt (every session) |
+| `wakeOnSettle` | on | Wake the lead when a wave settles or a worker needs it |
+| `notifyHuman` | on | Also send you a herdr notification |
+| `autoContinue` | off | When the run isn't finished and no worker is busy, prompt the lead to keep going |
+| `autoContinueMax` | 3 | Max auto-continues in a row (any prompt you type resets it) |
 
-## 開發
+## Troubleshooting
+
+**The lead can't find `omh_dispatch` or the other tools.**
+The mod only starts in a lead running inside a herdr pane (`HERDR_ENV=1`). Start `herdr` and run `claude` in a pane.
+
+**A Claude worker is stuck at "Is this a project you created or one you trust?"**
+Claude Code hasn't trusted that folder yet. Accept it once in that pane.
+
+**The lead reports `config-error`.**
+A wrong model id, a missing login or API key. Re-dispatching fails the same way — fix the config and confirm with `/omh check`.
+
+**The lead reports `quota-exhausted` or `no-profile`.**
+A subscription ran out. The lead re-dispatches to another profile with quota left; if every one is out, `/omh quota` shows when each resets.
+
+**Two workers edited the same file.**
+Tasks in one wave must not own the same files, so the plan's `owns` was wrong. Run `/omh teardown` and ask the lead to re-plan.
+
+## Development
 
 ```sh
-claude --plugin-dir ~/codes/github/oh-my-herdr   # 或把路徑放進 CLAUDE_CODE_PLUGIN_DIRS
+claude --plugin-dir ~/codes/github/oh-my-herdr   # or add the path to CLAUDE_CODE_PLUGIN_DIRS
 claude plugin validate .
 claude plugin test .
 ```
 
-設計與進度見 [plan.md](plan.md)。
+The lead's workflow is in [skills/oh-my-herdr/SKILL.md](skills/oh-my-herdr/SKILL.md); brief templates per role are in [references/roles.md](skills/oh-my-herdr/references/roles.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE). `skills/herdr/` comes from the herdr project and is Apache-2.0 — see [skills/herdr/LICENSE](skills/herdr/LICENSE).

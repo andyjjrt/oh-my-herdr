@@ -91,4 +91,4 @@ Every brief tells the worker to write `.omh/runs/<run>/<task>/result.md` and rep
 - **Two workers edited the same file** — the plan's `owns` was wrong. Tear down, re-plan with proper ownership.
 - **The worker went off-script** — check its brief (`.omh/runs/<run>/<task>/brief.md`); the fix is almost always a clearer brief, not a stronger model.
 
-Raw herdr commands, for when you need to look at a pane yourself: `references/herdr-cheatsheet.md`.
+Raw herdr commands, for when you need to look at a pane yourself: `references/herdr-cheatsheet.md`. For anything beyond it (pane layout, waits, read sources, safety rules), load the bundled `herdr` skill — herdr's own guide, shipped with this plugin.
