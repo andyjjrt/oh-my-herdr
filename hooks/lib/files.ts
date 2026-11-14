@@ -2,7 +2,11 @@
 //
 //   .omh/agents/<name>.json            one worker: pane, profile, family, agent, task, run
 //   .omh/tab.json                      the omh-workers tab and its root pane
-//   .omh/current-run                   id of the run the band follows
+//   .omh/current-run                   id of the run the mod follows
+//   .omh/status.json                   the current run's progress, for a custom status line (statusline/)
+//   .omh/plan.md                       the plan in prose the lead drafts and the user approves
+//   .omh/plan.approved                 digest of the plan.md the user approved (/omh approve)
+//   .omh/runs/<run>/plan.md            the approved plan.md the run's plan.json was derived from
 //   .omh/runs/<run>/plan.json          the plan (hooks/lib/plan.ts)
 //   .omh/runs/<run>/gates.json         { "passed": [1, 2] }
 //   .omh/runs/<run>/<task>/brief.md    what the worker was told
@@ -58,6 +62,10 @@ export class Paths {
   get tab() {
     return `${this.omh}/tab.json`
   }
+  /** The current run's progress for a custom status line (OmhStatusFile in hooks/lib/plan.ts). */
+  get status() {
+    return `${this.omh}/status.json`
+  }
   get currentRun() {
     return `${this.omh}/current-run`
   }
@@ -69,6 +77,17 @@ export class Paths {
   }
   plan(run: string) {
     return `${this.run(run)}/plan.json`
+  }
+  /** The run's copy of the approved plan.md. */
+  planMd(run: string) {
+    return `${this.run(run)}/plan.md`
+  }
+  /** The plan.md being drafted, before it belongs to a run. */
+  get draft() {
+    return `${this.omh}/plan.md`
+  }
+  get approval() {
+    return `${this.omh}/plan.approved`
   }
   gates(run: string) {
     return `${this.run(run)}/gates.json`

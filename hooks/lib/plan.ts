@@ -159,11 +159,91 @@ export function runView(id: string, dir: string, plan: Plan, gates: ReadonlySet<
   return { id, dir, goal: plan.goal, current: currentWave(waves), waves }
 }
 
-/** The band's numbers for the current wave: tasks reported or better, of all. */
+/** The status line's numbers for the current wave: tasks reported or better, of all. */
 export function waveProgress(run: OmhRunView): { wave: number; done: number; total: number; alerts: number } | null {
   const wave = run.waves.find(w => w.id === run.current)
   if (!wave) return null
   const done = wave.tasks.filter(t => t.status === 'reported' || DONE.has(t.status)).length
   const alerts = wave.tasks.filter(t => t.status === 'blocked' || t.status === 'alert').length
   return { wave: wave.id, done, total: wave.tasks.length, alerts }
+}
+
+/**
+ * The status line's numbers for a whole run: tasks reported or closed, of all, and how many need
+ * the user. null once every gate has passed (nothing left to show) or when the plan is empty.
+ */
+export function runProgress(run: OmhRunView): { done: number; total: number; alerts: number } | null {
+  if (run.current === null) return null
+  const tasks = run.waves.flatMap(w => w.tasks)
+  if (tasks.length === 0) return null
+  const done = tasks.filter(t => t.status === 'reported' || DONE.has(t.status)).length
+  const alerts = tasks.filter(t => t.status === 'blocked' || t.status === 'alert').length
+  return { done, total: tasks.length, alerts }
+}
+
+/**
+ * .omh/status.json, for a custom status line to read (statusline/omh-wave; the README's Status line).
+ * Its fields are an API: add to them, never rename or drop one.
+ */
+export type OmhStatusFile = {
+  version: 1
+  run: string
+  goal: string
+  /** The current wave (1-based) and how many waves there are. */
+  wave: number
+  waves: number
+  /** Over the whole run: tasks reported or closed, of all; and how many need the user. */
+  done: number
+  total: number
+  alerts: number
+  /** The same for the current wave. */
+  wave_done: number
+  wave_total: number
+  /** Ready to print: ██░░░░ 2/5, then ⚠1 while a task needs the user. */
+  line: string
+  updated_at: string
+}
+
+/** The status file for a run, or null when there is nothing to show (no run, or every gate passed). */
+export function statusFile(run: OmhRunView, now: Date): OmhStatusFile | null {
+  const all = runProgress(run)
+  const wave = waveProgress(run)
+  if (all === null || wave === null) return null
+  const width = 6
+  const filled = all.total > 0 ? Math.round((all.done / all.total) * width) : 0
+  const bar = '█'.repeat(filled) + '░'.repeat(width - filled)
+  return {
+    version: 1,
+    run: run.id,
+    goal: run.goal,
+    wave: wave.wave,
+    waves: run.waves.length,
+    done: all.done,
+    total: all.total,
+    alerts: all.alerts,
+    wave_done: wave.done,
+    wave_total: wave.total,
+    line: `${bar} ${all.done}/${all.total}${all.alerts > 0 ? ` ⚠${all.alerts}` : ''}`,
+    updated_at: now.toISOString(),
+  }
+}
+
+// ------------------------------------------------------------------ plan.md and its approval
+
+/**
+ * A short fingerprint of plan.md's text. Approval records it, so a plan.md changed after the user
+ * approved it (by the lead, say) counts as not approved. Whitespace at the ends does not count.
+ */
+export function draftDigest(text: string): string {
+  let h = 0x811c9dc5
+  for (const ch of text.trim()) {
+    h ^= ch.codePointAt(0)!
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+/** Whether the user approved exactly this plan.md. */
+export function isApproved(draft: string | null, approved: string | null): boolean {
+  return draft !== null && draft.trim() !== '' && approved !== null && approved.trim() === draftDigest(draft)
 }

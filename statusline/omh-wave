@@ -1,0 +1,41 @@
+#!/bin/sh
+# omh-wave: the oh-my-herdr run's progress, for a custom status line (see the README's Status line).
+#
+#   omh-wave [dir]            the ready line, e.g. "██░░░░ 2/5" or "██░░░░ 2/5 ⚠1"; nothing when no run is open
+#   omh-wave --json [dir]     the whole .omh/status.json
+#   omh-wave --field F [dir]  one field: run goal wave waves done total alerts wave_done wave_total line updated_at
+#
+# dir defaults to the current directory; the nearest .omh/status.json at or above it is used.
+# The mod (hooks/lib/runtime.ts) keeps that file current while a run is open and removes it after.
+# Exit status is 0 either way, so a status line never shows an error.
+
+mode=line
+field=
+case "$1" in
+  --json) mode=json; shift ;;
+  --field) mode=field; field=$2; shift 2 ;;
+  -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+dir=${1:-$PWD}
+file=
+while :; do
+  if [ -f "$dir/.omh/status.json" ]; then file=$dir/.omh/status.json; break; fi
+  [ "$dir" = / ] || [ -z "$dir" ] && break
+  dir=$(dirname "$dir")
+done
+[ -n "$file" ] || exit 0
+
+case $mode in
+  json) cat "$file" ;;
+  line) field=line ;;
+esac
+[ "$mode" = json ] && exit 0
+
+if command -v jq >/dev/null 2>&1; then
+  jq -r --arg f "$field" '.[$f] // empty' "$file" 2>/dev/null
+else
+  # The file is written one field per line ("key": value), so sed reads it without jq.
+  sed -n -e "s/^  \"$field\": \"\(.*\)\",\{0,1\}\$/\1/p" -e "s/^  \"$field\": \([0-9][0-9]*\),\{0,1\}\$/\1/p" "$file"
+fi
+exit 0

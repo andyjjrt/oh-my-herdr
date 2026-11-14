@@ -4,15 +4,16 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { check, closeTask, collect, dispatch, passGate, quotaReport, spawn, status, teardown, writePlan, type Answer } from './lib/actions'
-import { BOARD_ID, bandView, boardView } from './lib/board'
+import { approvePlan, check, closeTask, collect, dispatch, draftPlan, passGate, quotaReport, spawn, status, teardown, writePlan, type Answer } from './lib/actions'
+import { BOARD_ID, boardView } from './lib/board'
 import { bind, readEnv } from './lib/engine'
 import { Paths } from './lib/files'
 import { ownerOf, relativeTo } from './lib/guards'
 import { loadPlan, config, flushWake, optionsOf, reconcile, refreshQuota, refreshRun, rt, workers } from './lib/runtime'
 import { ACTIVE } from './lib/settle'
-import { refreshStatusbar, statusbarLine } from './lib/statusbar'
 import { statusText, ulwPrompt } from './lib/text'
+import { progressPanel, statusTail } from './lib/statusbar'
+import { compactCall, compactResult, OMH_TOOL } from './lib/toolrow'
 
 // The same refs as hooks/lib/engine.ts: a read must name a const of its own file, and a read made
 // while drawing subscribes the drawing to the value.
@@ -49,13 +50,15 @@ const TOOLS = [
   {
     name: 'omh_status',
     description: [
-      'The run\'s plan and progress. action "show": waves, tasks, workers. "plan": save plan.json (goal; waves with id, gate and tasks; each task id, title, intent, category, owns[], deps[]); tasks in one wave must not own the same files.',
+      'The run\'s plan and progress. action "show": waves, tasks, workers. "draft": write plan.md, the plan in prose (goal, findings with file:line, approach, tasks with acceptance checks, risks, open questions); then summarise it for the user and end your turn — they approve it with /omh approve.',
+      '"plan": only after plan.md is approved, save plan.json derived from it (goal; waves with id, gate and tasks; each task id, title, intent, category, owns[], deps[]); tasks in one wave must not own the same files. Each plan.json needs plan.md approved again.',
       '"verified" / "abandon": close a task with a one-line `quality` note on how good the result was. "gate": mark a wave\'s gate passed once all its tasks are closed; the next wave cannot be dispatched before that.',
     ].join(' '),
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['show', 'plan', 'verified', 'abandon', 'gate'] },
+        action: { type: 'string', enum: ['show', 'draft', 'plan', 'verified', 'abandon', 'gate'] },
+        markdown: { type: 'string', description: 'For "draft": the whole plan.md' },
         plan: { type: 'object', description: 'For "plan": { goal, waves: [{ id, gate, tasks: [{ id, title, intent, category, owns, deps }] }] }' },
         new_run: { type: 'boolean', description: 'For "plan": start a new run instead of replanning the current one' },
         task: { type: 'string' },
@@ -111,6 +114,8 @@ async function serve(name: string, a: Args): Promise<Answer> {
       })
     case 'omh_status':
       switch (a.action) {
+        case 'draft':
+          return draftPlan(typeof a.markdown === 'string' ? a.markdown : '')
         case 'plan':
           return writePlan(a.plan, a.new_run === true)
         case 'verified':
@@ -163,13 +168,11 @@ export const register: Register = (on, options) => {
   const live = () => rt.$ !== null
 
   on('session.start', async ($, e, next) => {
-    // The status line works in every session; the rest of the mod only in a herdr lead pane.
-    if (rt.options.statusbar) refreshStatusbar($)
     if (!(await boot($, e.cwd))) return next(e)
     await Promise.all([
       ...TOOLS.map(t => $.tool.register({ name: t.name, description: t.description, inputSchema: t.inputSchema as unknown as Record<string, unknown>, isDeferred: false }).catch(() => undefined)),
       $.command.register({ name: 'ulw', description: 'oh-my-herdr: ultrawork — plan, fan out to herdr workers, verify', argumentHint: '<goal>' }).catch(() => undefined),
-      $.command.register({ name: 'omh', description: 'oh-my-herdr: status | quota | check | board | teardown', argumentHint: 'status|quota|check|board|teardown', immediate: true }).catch(() => undefined),
+      $.command.register({ name: 'omh', description: 'oh-my-herdr: status | approve | quota | check | board | teardown', argumentHint: 'status [full]|approve|quota|check|board|teardown', immediate: true }).catch(() => undefined),
     ])
     // Reattaching watchers reads herdr and the disk: keep it out of the session's start.
     $.clock.after(0, () => {
@@ -223,13 +226,25 @@ export const register: Register = (on, options) => {
     const sub = e.args.trim().split(/\s+/)[0] || 'status'
     switch (sub) {
       case 'status':
-        return { text: (await status()).text }
+        return { text: (await status(e.args.trim().split(/\s+/)[1] === 'full' ? 'full' : 'brief')).text }
       case 'quota':
         return { text: (await quotaReport()).text }
       case 'check':
         return { text: (await check()).text }
       case 'teardown':
         return { text: (await teardown(undefined)).text }
+      case 'approve': {
+        const answer = await approvePlan()
+        // The lead ended its turn to wait for this: wake it to split the plan into waves.
+        if (answer.ok) {
+          $.clock.after(0, () => {
+            $.prompt
+              .submit({ text: 'plan.md approved (/omh approve). Derive the waves from .omh/plan.md with omh_status action "plan", then dispatch the first wave.', asUser: true })
+              .catch(err => $.ui.toast(`oh-my-herdr: could not wake the lead: ${(err as Error).message}`))
+          })
+        }
+        return { text: answer.text }
+      }
       case 'board': {
         const isOpen = (await $.ui.panes()).some((p: { id: string }) => p.id === BOARD_ID)
         if (isOpen) {
@@ -242,37 +257,52 @@ export const register: Register = (on, options) => {
         return { text: r.isPlaced ? 'board opened' : `board will show when there is room${'reason' in r && r.reason ? ` (${r.reason})` : ''}` }
       }
       default:
-        return { text: 'usage: /omh status | quota | check | board | teardown' }
+        return { text: 'usage: /omh status [full] | approve | quota | check | board | teardown' }
     }
   }).catch(() => ({ text: 'oh-my-herdr: the command failed; see the debug log' }))
 
   // ---------------------------------------------------------------- drawing
-
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!live() || !rt.options.band || e.props.hasSurvey) return next(e)
-    const view = bandView($.ui.resolve(e) as never, await read($, RUN))
-    return view === null ? next(e) : (view as never)
-  })
 
   on('ui.render', { component: 'Pane', requestId: BOARD_ID }, async ($, e) => {
     const el = $.ui.resolve(e) as never
     return boardView(el, await read($, RUN), await read($, WORKERS), await read($, QUOTA), (e.viewport?.rows ?? 30) - 2) as never
   })
 
-  // ---------------------------------------------------------------- status line (every session)
+  // One line per omh_* call and the first line of its result, unless `verbose` is on or the view
+  // is expanded (ctrl+o, --verbose).
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    if (rt.options.verbose || e.props.isExpanded === true || !OMH_TOOL.test(e.props.tool)) return next(e)
+    return compactCall($.ui.resolve(e) as never, e.props) as never
+  })
 
-  // /model changes what the line shows without a turn: redraw right after it.
-  on('command.run', { command: 'model' }, async ($, e, next) => {
-    const done = await next(e)
-    if (!rt.options.statusbar) return done
-    refreshStatusbar($)
-    return done
-  }).catch(($, e, next) => next(e))
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    if (rt.options.verbose || e.props.isExpanded === true || !OMH_TOOL.test(e.props.tool)) return next(e)
+    return compactResult($.ui.resolve(e) as never, e.props) as never
+  })
 
+  // ---------------------------------------------------------------- status line / panel (`display`)
+
+  // The run's progress at the end of the engine's own hint line; the engine keeps drawing the rest.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    if (!rt.options.statusbar) return next(e)
-    const line = await statusbarLine($, e, $.ui.resolve(e) as never)
-    return line === null ? next(e) : (line as never)
+    if (rt.options.display !== 'statusline') return next(e)
+    const tail = await statusTail($)
+    if (tail === null) return next(e)
+    return next({ ...e, props: { ...e.props, tail: e.props.tail ? `${e.props.tail} · ${tail}` : tail } })
+  })
+
+  // A row above the prompt while a run is open; what else is drawn there stays under it.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (rt.options.display !== 'panel' || e.props.hasSurvey) return next(e)
+    const el = $.ui.resolve(e) as { Box: any; Text: any }
+    const panel = await progressPanel($, el)
+    if (panel === null) return next(e)
+    const { Box } = el
+    return (
+      <Box flexDirection="column">
+        {panel as never}
+        {(await next(e)) as never}
+      </Box>
+    ) as never
   })
 
   // ---------------------------------------------------------------- guards
@@ -297,7 +327,6 @@ export const register: Register = (on, options) => {
 
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
-    if (rt.options.statusbar) refreshStatusbar($)
     if (!live() || e.agentId !== undefined || 'skip' in result) return result
     $.clock.after(0, () => {
       void (async () => {
@@ -321,7 +350,6 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (rt.options.statusbar && e.agentId === undefined) refreshStatusbar($)
     if (!live() || !rt.options.autoContinue || e.agentId !== undefined || e.reason !== 'answer') return result
     void maybeContinue($).catch(() => undefined)
     return result

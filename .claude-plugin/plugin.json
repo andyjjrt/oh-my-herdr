@@ -1,24 +1,23 @@
 {
   "name": "oh-my-herdr",
   "version": "0.1.0",
-  "description": "OmO-style multi-agent orchestration on herdr: Claude Code leads, worker agents run in herdr panes. Also a compact status line.",
+  "description": "OmO-style multi-agent orchestration on herdr: Claude Code leads, worker agents run in herdr panes.",
   "author": {
     "name": "andyjjrt"
   },
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
-    "band": {
-      "type": "boolean",
-      "title": "Wave band",
-      "description": "Show the current wave's progress bar above the prompt.",
-      "default": true
-    },
-    "statusbar": {
-      "type": "boolean",
-      "title": "Status line",
-      "description": "Turn the hint line under the prompt into one compact line: model, folder and git branch, context bar, 5-hour/weekly usage. Works in every session, not only in herdr.",
-      "default": true
+    "display": {
+      "type": "string",
+      "title": "Progress display",
+      "description": "Where the run's progress (omh ██░░░░ 2/5) shows while a run is open. statusline: at the end of Claude Code's own hint line under the prompt. panel: a row above the prompt, with the wave. off: neither. .omh/status.json is written either way, for a custom status line.",
+      "default": "statusline",
+      "options": [
+        "statusline",
+        "panel",
+        "off"
+      ]
     },
     "wakeOnSettle": {
       "type": "boolean",
@@ -43,6 +42,12 @@
       "title": "Auto-continue limit",
       "description": "Most auto-continue prompts in a row; any prompt you type resets the count.",
       "default": 3
+    },
+    "verbose": {
+      "type": "boolean",
+      "title": "Verbose tool rows",
+      "description": "Show the omh_* tool calls in full (the whole brief, plan.md or plan, and the whole result). Off: one line per call and the result's first line; ctrl+o still shows everything.",
+      "default": false
     }
   }
 }

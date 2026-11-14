@@ -79,6 +79,45 @@ export function statusText(run: OmhRunView | null, workers: Record<string, OmhWo
   return lines.join('\n')
 }
 
+/**
+ * /omh status for a person: the current wave in detail, every other wave on one line, and only the
+ * workers that are busy or in trouble. The full table (run dir, profiles, panes) is `/omh status full`
+ * and what the lead reads.
+ */
+export function statusBrief(run: OmhRunView | null, workers: Record<string, OmhWorker>): string {
+  const lines: string[] = []
+  if (run === null) {
+    lines.push('No run in progress. /ulw <goal> starts one.')
+  } else {
+    const all = run.waves.flatMap(w => w.tasks)
+    const closed = all.filter(t => t.status === 'verified' || t.status === 'abandoned').length
+    const trouble = all.filter(t => t.status === 'alert' || t.status === 'blocked').length
+    const at = run.current === null ? 'done' : `W${run.current}/${run.waves.length}`
+    lines.push(`${run.goal} · ${at} · ${closed}/${all.length} closed${trouble > 0 ? ` · ⚠${trouble}` : ''}`)
+    for (const w of run.waves) {
+      const done = w.tasks.filter(t => t.status === 'verified' || t.status === 'abandoned').length
+      if (w.id !== run.current) {
+        lines.push(w.gatePassed ? `✓ W${w.id} gate passed (${w.tasks.length} task${w.tasks.length === 1 ? '' : 's'})` : `· W${w.id} ${done}/${w.tasks.length}`)
+        continue
+      }
+      lines.push(`▶ W${w.id} ${done}/${w.tasks.length} — gate: ${w.gate}`)
+      for (const t of w.tasks) {
+        const who = t.worker && (t.status === 'working' || t.status === 'blocked' || t.status === 'alert') ? ` → ${t.worker}` : ''
+        lines.push(`  ${ICON[t.status]} ${t.id} ${t.title}${who}${t.note && t.status !== 'verified' ? ` · ${t.note}` : ''}`)
+      }
+    }
+  }
+  const ws = Object.values(workers)
+  const shown = ws.filter(w => w.phase !== 'idle')
+  const idle = ws.length - shown.length
+  if (ws.length > 0) {
+    const bits = shown.map(w => `${w.name} ${w.diagnosis ? w.diagnosis.verdict : w.phase}`)
+    if (idle > 0) bits.push(`${idle} idle`)
+    lines.push(`workers: ${bits.join(', ')}`)
+  }
+  return lines.join('\n')
+}
+
 export function ulwPrompt(goal: string): string {
   return [
     `ulw — ultrawork with oh-my-herdr. Goal: ${goal.trim() || '(ask me what the goal is)'}`,
@@ -86,9 +125,10 @@ export function ulwPrompt(goal: string): string {
     'Run the oh-my-herdr loop with the `mcp__oh-my-herdr__*` tools:',
     '1. Explore enough to plan (read code yourself or dispatch `explore` tasks).',
     '2. Intent Gate: for every task decide its intent (explore, research, implement, fix, review, plan, write) and category.',
-    '3. Write the plan with `omh_status` action `plan`: waves of tasks, each task with the files it owns; a gate per wave.',
-    '4. Dispatch the current wave with `omh_dispatch` (intent, category, a one-line rationale, the brief). Do not wait or poll: you will be woken when the wave settles or a worker needs you.',
-    '5. When woken: `omh_collect`, verify each result yourself, mark it `verified` or `abandon` with a one-line quality note, run the gate, mark it, then dispatch the next wave.',
-    '6. Finish with the full acceptance check, a short report, and `omh_teardown`.',
+    '3. Draft the plan in prose with `omh_status` action `draft` (plan.md: goal, findings with file:line, approach, tasks with acceptance checks, risks, open questions). Summarise it for me and END YOUR TURN: I read it and approve it with /omh approve, or ask for changes.',
+    '4. Once approved, derive the waves from plan.md with `omh_status` action `plan`: waves of tasks, each task with the files it owns; a gate per wave.',
+    '5. Dispatch the current wave with `omh_dispatch` (intent, category, a one-line rationale, the brief). Do not wait or poll: you will be woken when the wave settles or a worker needs you.',
+    '6. When woken: `omh_collect`, verify each result yourself, mark it `verified` or `abandon` with a one-line quality note, run the gate, mark it, then dispatch the next wave.',
+    '7. Finish with the full acceptance check, a short report, and `omh_teardown`.',
   ].join('\n')
 }

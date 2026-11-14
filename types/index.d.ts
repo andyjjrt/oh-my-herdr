@@ -56,16 +56,6 @@ export type OmhWaveView = { id: number; gate: string; gatePassed: boolean; tasks
 
 export type OmhRunView = { id: string; dir: string; goal: string; current: number | null; waves: OmhWaveView[] }
 
-/** What the status line shows besides the engine's own mode pill. */
-export type OmhStatusbar = {
-  cwd: string
-  /** The checked-out branch, a short commit id when detached; null outside a git repository. */
-  branch: string | null
-  model: string
-  contextPercent: number | null
-  limits: { kind: string; percent: number }[]
-}
-
 export type OmhWake = { sections: string[]; settleKey: string }
 
 export type OmhQuotaWindow = { name: string; usedPercent: number; resetsAt: string | null; scope: string | null }
@@ -89,7 +79,6 @@ declare module 'claude-code' {
       /** Wake-ups not yet sent to the lead, and the last wave state it was told about. Kept here so a reload loses neither. */
       wake: Shaped<OmhWake>
       boardOpen: boolean
-      statusbar: Shaped<OmhStatusbar | null>
     }
   }
 }

@@ -7,7 +7,7 @@ import { configProblems, type Config } from './config'
 import { diagnose, excerpt } from './diagnose'
 import { currentRunId, hasText, listWorkers, readGates, readJson, remove, writeJson, type Closing, type DispatchFile, type WorkerFile } from './files'
 import { agentStatus, closePane, createTab, herdr, HerdrError, paneExists, readScreen, shellQuote, splitPane } from './herdr'
-import { DONE, findTask, parsePlan, TASK_ID } from './plan'
+import { DONE, draftDigest, findTask, isApproved, parsePlan, TASK_ID } from './plan'
 import { formatQuota, providerOf, quotaAllows } from './quota'
 import { INTENTS, isUsualPair, pickProfile, type Intent } from './route'
 import { isFree, newWorker } from './settle'
@@ -29,7 +29,7 @@ import {
   stopWatcher,
   workers,
 } from './runtime'
-import { statusText } from './text'
+import { statusBrief, statusText } from './text'
 
 export type Answer = { ok: boolean; text: string }
 
@@ -417,9 +417,53 @@ async function preambleFor(cfg: Config, category: string): Promise<string | null
 
 // ------------------------------------------------------------------ status operations
 
+async function readText($: ReturnType<typeof host>, path: string): Promise<string | null> {
+  try {
+    return await $.fs.read(path)
+  } catch {
+    return null
+  }
+}
+
+/** Step one of planning: the plan in prose, for the user to read and approve before any wave exists. */
+export async function draftPlan(markdown: string): Promise<Answer> {
+  const $ = host()
+  const p = paths()
+  if (!markdown.trim()) return fail('draft needs "markdown": the plan as markdown (goal, findings, approach, tasks with acceptance checks, risks, open questions)')
+  await $.fs.write(p.draft, `${markdown.trim()}\n`)
+  await remove($, p.approval)
+  const lines = markdown.trim().split('\n').length
+  return ok(
+    [
+      `plan.md written: ${p.draft} (${lines} lines). It is not approved yet.`,
+      'Now give the user a short summary (goal, the tasks, anything you need them to decide) and the path, then END YOUR TURN.',
+      'Do not write plan.json or dispatch anything: the user reads or edits plan.md and approves it with /omh approve, which wakes you to derive the waves. If they ask for changes, draft again.',
+    ].join('\n'),
+  )
+}
+
+/** /omh approve: the user approves plan.md as it is now. */
+export async function approvePlan(): Promise<Answer> {
+  const $ = host()
+  const p = paths()
+  const draft = await readText($, p.draft)
+  if (draft === null || draft.trim() === '') return fail(`no plan.md to approve (${p.draft}); ask the lead to draft one first`)
+  await $.fs.write(p.approval, `${draftDigest(draft)}\n`)
+  const title = draft.trim().split('\n').find(l => l.trim() !== '')?.replace(/^#+\s*/, '') ?? 'plan'
+  return ok(`approved plan.md: ${title}`)
+}
+
 export async function writePlan(raw: unknown, newRun: boolean): Promise<Answer> {
   const $ = host()
   const p = paths()
+  // Waves come from an approved plan.md, never straight from exploring.
+  const draft = await readText($, p.draft)
+  if (draft === null || draft.trim() === '') {
+    return fail('no plan.md yet. First write the plan in prose with omh_status action "draft" (markdown), show the user a summary, and end your turn until they approve it with /omh approve.')
+  }
+  if (!isApproved(draft, await readText($, p.approval))) {
+    return fail(`plan.md (${p.draft}) is not approved, or changed after it was approved. Ask the user to read it and run /omh approve, then end your turn. Do not dispatch anything until then.`)
+  }
   const cfg = await config()
   const parsed = parsePlan(raw, Object.keys(cfg.categories))
   if ('errors' in parsed) return fail(`plan rejected:\n- ${parsed.errors.join('\n- ')}`)
@@ -441,7 +485,10 @@ export async function writePlan(raw: unknown, newRun: boolean): Promise<Answer> 
     run = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}-${slug}`
   }
   await writeJson($, p.plan(run), parsed.plan)
+  await $.fs.write(p.planMd(run), draft)
   await $.fs.write(p.currentRun, `${run}\n`)
+  // One approval, one plan.json: a later replan needs plan.md approved again.
+  await remove($, p.approval)
   const view = await refreshRun()
   return ok(`plan saved for run ${run} (${parsed.plan.waves.length} wave(s), ${parsed.plan.waves.reduce((n, w) => n + w.tasks.length, 0)} task(s)). Current wave: ${view?.current ?? 'none'}. Dispatch its tasks with omh_dispatch.`)
 }
@@ -488,9 +535,10 @@ export async function passGate(waveId: number, note: string | undefined): Promis
   return ok(after?.current == null ? `gate ${waveId} passed. Every wave is done: run the final acceptance check, report, and omh_teardown.` : `gate ${waveId} passed. Wave ${after.current} may start now.`)
 }
 
-export async function status(): Promise<Answer> {
+/** The lead reads the full table; /omh status shows a person the brief one unless asked for full. */
+export async function status(form: 'full' | 'brief' = 'full'): Promise<Answer> {
   const view = await refreshRun()
-  return ok(statusText(view, await workers()))
+  return ok((form === 'brief' ? statusBrief : statusText)(view, await workers()))
 }
 
 export async function collect(taskId: string): Promise<Answer> {

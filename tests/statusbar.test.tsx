@@ -1,90 +1,124 @@
-// The status line under the prompt: its pieces, and the line as each surface draws it.
+// The run's progress under or above the prompt, as each `display` draws it.
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { contextBar as bar, limitsOf, prettyModel, shortPath, splitHint } from '../hooks/lib/statusbar'
+import { progressBar, progressText } from '../hooks/lib/statusbar'
 
-describe('pieces', () => {
-  test('the mode pill becomes one icon; the rest of the line stays', () => {
-    const a = splitHint('⏵⏵ auto mode on (shift+tab to cycle)')
-    expect(a.mode?.name).toBe('auto')
-    expect(a.rest).toBe('')
-    const b = splitHint('⏸ plan mode on (shift+tab to cycle) · esc to interrupt')
-    expect(b.mode?.name).toBe('plan')
-    expect(b.rest).toBe('esc to interrupt')
-    const c = splitHint('? for shortcuts')
-    expect(c.mode).toBe(null)
-    expect(c.rest).toBe('')
-    expect(splitHint('⏵⏵ accept edits on (shift+tab to cycle)').mode?.name).toBe('acceptEdits')
-    expect(splitHint('Press Ctrl-C again to exit').rest).toBe('Press Ctrl-C again to exit')
-    // What the terminal actually hands over: its mode pill is drawn outside the hint.
-    expect(splitHint('(shift+tab to cycle) · ← for agents').rest).toBe('')
-    expect(splitHint('(shift+tab to cycle) · esc to interrupt').rest).toBe('esc to interrupt')
-  })
-  test('model ids read as names', () => {
-    expect(prettyModel('claude-opus-5-5')).toBe('Opus 5.5')
-    expect(prettyModel('claude-sonnet-4-5-20250929')).toBe('Sonnet 4.5')
-    expect(prettyModel('claude-fable-5-2[1m]')).toBe('Fable 5.2')
-    expect(prettyModel('claude-opus-4-20250514')).toBe('Opus 4')
-    expect(prettyModel('opus')).toBe('Opus')
-  })
-  test('paths', () => {
-    expect(shortPath('/home/u/codes/x', '/home/u')).toBe('~/codes/x')
-    expect(shortPath('/home/u', '/home/u')).toBe('~')
-    expect(shortPath('/home/u/a/very/long/path/that/goes/on/and/on/project', '/home/u').length).toBeLessThanOrEqual(32)
-    expect(shortPath('/home/u/a/very/long/path/that/goes/on/and/on/project', '/home/u').endsWith('/project')).toBe(true)
-  })
-  test('quota figures survive a response without rate-limit headers', () => {
-    const last = [{ kind: 'five_hour', percent: 70 }, { kind: 'seven_day', percent: 9 }]
-    expect(limitsOf([], last)).toEqual(last)
-    expect(limitsOf([{ kind: 'seven_day', percentUsed: 10 }, { kind: 'five_hour', percentUsed: 74 }], last)).toEqual([
-      { kind: 'five_hour', percent: 74 },
-      { kind: 'seven_day', percent: 10 },
-    ])
-    expect(limitsOf([{ kind: 'spend_limit', percentUsed: 3 }], [])).toEqual([])
-  })
-  test('bar', () => {
-    expect(bar(0)).toBe('░░░░░░░░░░')
-    expect(bar(31)).toBe('███░░░░░░░')
-    expect(bar(150)).toBe('██████████')
-  })
-})
+const RUN = {
+  id: 'r1',
+  dir: '/work/.omh/runs/r1',
+  goal: 'g',
+  current: 1,
+  waves: [
+    {
+      id: 1,
+      gate: 'tests pass',
+      gatePassed: false,
+      tasks: [
+        { id: 'T1', title: 'a', category: 'quick', status: 'verified', worker: 'w1', profile: 'go-fast', note: null },
+        { id: 'T2', title: 'b', category: 'quick', status: 'alert', worker: 'w2', profile: 'go-fast', note: 'crashed' },
+        { id: 'T3', title: 'c', category: 'quick', status: 'working', worker: 'w3', profile: 'go-fast', note: null },
+      ],
+    },
+    { id: 2, gate: 'review', gatePassed: false, tasks: [] },
+  ],
+}
+
+/** state.get answers: the run, none unless given. */
+function state(run: unknown = null) {
+  return (() => ({ value: { value: { shape: 'run-1', value: run }, version: 1 } })) as never
+}
 
 const HINT = {
   plugin: 'oh-my-herdr',
   component: 'PromptHint',
-  props: { isDraft: false, isWorking: false, hint: '⏵⏵ auto mode on (shift+tab to cycle)' },
+  props: { isDraft: false, isWorking: false, hint: '(shift+tab to cycle) · esc to interrupt' },
 } as const
 
-const INFO = {
-  cwd: '~/codes/github/oh-my-herdr',
-  branch: 'main',
-  model: 'Opus 5.5',
-  contextPercent: 31,
-  limits: [
-    { kind: 'five_hour', percent: 12 },
-    { kind: 'seven_day', percent: 93 },
-  ],
+const ABOVE = {
+  plugin: 'oh-my-herdr',
+  component: 'AbovePrompt',
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 20 },
+} as const
+
+type Drawn = { type: string; props: Record<string, unknown>; children: unknown[] }
+const nodes = (d: Drawn) => d.children.filter((c): c is Drawn => typeof c === 'object' && c !== null && 'props' in c)
+const textOf = (d: unknown): string =>
+  typeof d === 'string' || typeof d === 'number' ? String(d) : d && typeof d === 'object' && 'children' in d ? (d as Drawn).children.map(textOf).join('') : ''
+
+/** Stands in for the engine: draws the hint, then the tail a hook added. */
+function engine(on: any) {
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.component === 'PromptHint' ? `${e.props.hint}${e.props.tail ? ` | ${e.props.tail}` : ''}` : 'engine'}</Text>
+  })
 }
 
-test('the line on terminal and desktop', async ($, on) => {
-  on('state.get', ($, e) => (e.key === 'statusbar' ? { value: { value: { shape: 'statusbar-1', value: INFO }, version: 1 } } : undefined) as never)
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ ...HINT, surface } as never)
-    const line = await ui.find({ type: 'Text', text: /Opus 5\.5/ })
-    expect(line?.text).toBe('⏵ Opus 5.5 · ~/codes/github/oh-my-herdr  main · ███░░░░░░░ 31% · 12%/93%')
-    // The line replaces the engine's on purpose; its mode pill and hints are folded in.
-    expect(await ui.keepsBeneath()).toBe(false)
-    await ui.unmount()
-  }
+describe('pieces', () => {
+  test('bar and text', () => {
+    expect(progressBar(0, 5)).toBe('░░░░░░')
+    expect(progressBar(2, 5)).toBe('██░░░░')
+    expect(progressBar(5, 5)).toBe('██████')
+    expect(progressBar(0, 0)).toBe('░░░░░░')
+    expect(progressText(RUN as never)).toBe('omh ██░░░░ 1/3 ⚠1')
+    expect(progressText(null)).toBe(null)
+    expect(progressText({ ...RUN, current: null } as never)).toBe(null)
+  })
 })
 
-test('before anything is known the engine draws its own line', async ($, on) => {
-  on('ui.render', ($, e) => {
-    const { Text } = $.ui.resolve(e)
-    return <Text>engine</Text>
+describe('display: statusline (the default)', () => {
+  test('the engine keeps its line; the progress is added to its end', async ($, on) => {
+    on('state.get', state(RUN))
+    engine(on as never)
+    const ui = await $.ui.mount({ ...HINT, surface: 'terminal' } as never)
+    expect(textOf(await ui.drawn())).toBe('(shift+tab to cycle) · esc to interrupt | omh ██░░░░ 1/3 ⚠1')
+    await ui.unmount()
+    const above = await $.ui.mount({ ...ABOVE, surface: 'terminal' } as never)
+    expect(textOf(await above.drawn())).toBe('engine')
+    await above.unmount()
   })
-  const ui = await $.ui.mount({ ...HINT, surface: 'terminal' } as never)
-  expect((await ui.find({ type: 'Text' }))?.text).toBe('engine')
-  await ui.unmount()
+
+  test('no run, no change', async ($, on) => {
+    on('state.get', state(null))
+    engine(on as never)
+    const ui = await $.ui.mount({ ...HINT, surface: 'terminal' } as never)
+    expect(textOf(await ui.drawn())).toBe('(shift+tab to cycle) · esc to interrupt')
+    await ui.unmount()
+  })
+})
+
+describe('display: panel', () => {
+  test('a row above the prompt shows the run; the hint line is left alone', { options: { display: 'panel' } }, async ($, on) => {
+    on('state.get', state(RUN))
+    engine(on as never)
+    const hint = await $.ui.mount({ ...HINT, surface: 'terminal' } as never)
+    expect(textOf(await hint.drawn())).toBe('(shift+tab to cycle) · esc to interrupt')
+    await hint.unmount()
+    const ui = await $.ui.mount({ ...ABOVE, surface: 'terminal' } as never)
+    const drawn = (await ui.drawn()) as Drawn
+    expect(textOf(nodes(drawn)[0])).toBe('omh ██░░░░ 1/3 · W1/2 · ⚠1')
+    // What else is drawn above the prompt stays, under the row.
+    expect(textOf(drawn).endsWith('engine')).toBe(true)
+    await ui.unmount()
+  })
+
+  test('no row without an open run', { options: { display: 'panel' } }, async ($, on) => {
+    on('state.get', state(null))
+    engine(on as never)
+    const ui = await $.ui.mount({ ...ABOVE, surface: 'terminal' } as never)
+    expect(textOf(await ui.drawn())).toBe('engine')
+    await ui.unmount()
+  })
+})
+
+describe('display: off', () => {
+  test('neither', { options: { display: 'off' } }, async ($, on) => {
+    on('state.get', state(RUN))
+    engine(on as never)
+    for (const site of [HINT, ABOVE]) {
+      const ui = await $.ui.mount({ ...site, surface: 'terminal' } as never)
+      expect(textOf(await ui.drawn())).not.toContain('omh')
+      await ui.unmount()
+    }
+  })
 })

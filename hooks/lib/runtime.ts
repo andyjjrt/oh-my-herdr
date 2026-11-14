@@ -9,31 +9,33 @@ import type { Engine } from './engine'
 import type { OmhDiagnosis, OmhQuota, OmhRunView, OmhWorker } from '../../types'
 import { type Config, loadConfig } from './config'
 import { diagnose, excerpt } from './diagnose'
-import { appendLine, currentRunId, hasText, listWorkers, Paths, readGates, readJson, type Closing, type DispatchFile, writeJson } from './files'
+import { appendLine, currentRunId, hasText, listWorkers, Paths, readGates, readJson, remove, type Closing, type DispatchFile, writeJson } from './files'
 import { agentStatus, notify, readScreen } from './herdr'
-import { type Plan, parsePlan, runView, type TaskFacts, waveProgress } from './plan'
+import { type Plan, parsePlan, runView, statusFile, type TaskFacts } from './plan'
 import { PROVIDERS, probe, providerOf, quotaAllows, type Provider } from './quota'
 import { ACTIVE, newWorker, type SettleEffect, type SettleEvent, step } from './settle'
+import { type Display, displayOf } from './statusbar'
 import { alertText, settleText } from './text'
 
 export type Options = {
-  band: boolean
-  statusbar: boolean
+  /** Where the run's progress shows: the mod's status line, a row above the prompt, or neither. */
+  display: Display
   wakeOnSettle: boolean
   notifyHuman: boolean
   autoContinue: boolean
   autoContinueMax: number
+  verbose: boolean
 }
 
 export function optionsOf(o: PluginOptions): Options {
   const b = (k: string, d: boolean) => (typeof o[k] === 'boolean' ? (o[k] as boolean) : d)
   return {
-    band: b('band', true),
-    statusbar: b('statusbar', true),
+    display: displayOf(o.display),
     wakeOnSettle: b('wakeOnSettle', true),
     notifyHuman: b('notifyHuman', true),
     autoContinue: b('autoContinue', false),
     autoContinueMax: typeof o.autoContinueMax === 'number' ? o.autoContinueMax : 3,
+    verbose: b('verbose', false),
   }
 }
 
@@ -252,11 +254,13 @@ export async function refreshRun(): Promise<OmhRunView | null> {
   const id = await currentRunId($, p)
   if (id === null) {
     await $.state.run.set(() => null)
+    await publishStatus(null)
     return null
   }
   const plan = await loadPlan(id)
   if (plan === null) {
     await $.state.run.set(() => null)
+    await publishStatus(null)
     return null
   }
   const gates = await readGates($, p, id)
@@ -283,10 +287,20 @@ export async function refreshRun(): Promise<OmhRunView | null> {
   }
   const view = runView(id, p.run(id), plan, gates, tid => facts.get(tid)!)
   await $.state.run.set(() => view)
-  const prog = waveProgress(view)
-  // The band already shows this; the pinned status line is for when it is turned off.
-  $.ui.status(prog && !rt.options.band ? `omh W${prog.wave} ${prog.done}/${prog.total}${prog.alerts > 0 ? ` ⚠${prog.alerts}` : ''}` : undefined)
+  await publishStatus(view)
   return view
+}
+
+/** Write .omh/status.json for a custom status line, or remove it when there is nothing to show. */
+async function publishStatus(view: OmhRunView | null): Promise<void> {
+  const $ = host()
+  const file = view === null ? null : statusFile(view, new Date())
+  try {
+    if (file === null) await remove($, paths().status)
+    else await writeJson($, paths().status, file)
+  } catch {
+    // The status line is a nicety; a failed write must not stop the run.
+  }
 }
 
 async function maybeWaveSettled(): Promise<void> {

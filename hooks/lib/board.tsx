@@ -1,11 +1,10 @@
-// The band (one row above the prompt: the current wave's progress) and the /omh board pane.
+// The /omh board pane. The run's progress also shows under or above the prompt (hooks/lib/statusbar.tsx) and in .omh/status.json.
 
 import type { OmhQuota, OmhRunView, OmhTaskStatus, OmhWorker } from '../../types'
-import { waveProgress } from './plan'
 
 export const BOARD_ID = 'omh-board'
 
-type Elements = { Box: any; Text: any; Progress?: any }
+type Elements = { Box: any; Text: any }
 
 const COLOR: Partial<Record<OmhTaskStatus, string>> = { blocked: 'yellow', alert: 'red', verified: 'green', reported: 'cyan', working: 'blue' }
 
@@ -17,27 +16,6 @@ const ICON: Record<OmhTaskStatus, string> = {
   reported: '◆',
   verified: '✓',
   abandoned: '✗',
-}
-
-/** null when there is nothing to show. */
-export function bandView(el: Elements, run: OmhRunView | null): unknown {
-  if (run === null) return null
-  const prog = waveProgress(run)
-  if (prog === null) return null
-  const { Box, Text, Progress } = el
-  const figure = `${prog.done}/${prog.total}${prog.alerts > 0 ? ` ⚠${prog.alerts}` : ''}`
-  // Progress draws its own label and figure; the text fallback is for surfaces without it.
-  return Progress ? (
-    <Box>
-      <Progress label={`omh W${prog.wave}`} value={prog.done} max={prog.total} valueText={figure} {...(prog.alerts > 0 && { color: 'yellow' })} />
-    </Box>
-  ) : (
-    <Box>
-      <Text>
-        omh W{prog.wave} {bar(prog.done, prog.total, 12)} {figure}
-      </Text>
-    </Box>
-  )
 }
 
 export function bar(done: number, total: number, width: number): string {

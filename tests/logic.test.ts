@@ -5,10 +5,12 @@ import { describe, expect, test } from 'claude-code/testing'
 import { normalizeConfig } from '../hooks/lib/config'
 import { diagnose } from '../hooks/lib/diagnose'
 import { ownerOf, relativeTo } from '../hooks/lib/guards'
-import { findTask, parsePlan, runView, taskStatus, waveProgress, type TaskFacts } from '../hooks/lib/plan'
+import { draftDigest, findTask, isApproved, parsePlan, runView, statusFile, taskStatus, waveProgress, type TaskFacts } from '../hooks/lib/plan'
 import { evaluate, parseClaude, parseOpencodeGo, providerOf, quotaAllows } from '../hooks/lib/quota'
 import { isUsualPair, pickProfile } from '../hooks/lib/route'
 import { newWorker, step, type SettleFacts } from '../hooks/lib/settle'
+import { statusBrief } from '../hooks/lib/text'
+import { callSummary, firstLine, OMH_TOOL, resultText } from '../hooks/lib/toolrow'
 import type { OmhQuota } from '../types'
 import { CLAUDE_USAGE, OPENCODE_GO_USAGE } from './fixtures/quota'
 
@@ -181,6 +183,17 @@ describe('plan', () => {
     expect(text).toContain("unknown category 'nope'")
     expect(text).toContain('must be in an earlier wave')
   })
+  test('plan.md counts as approved only as it was when approved', () => {
+    const md = '# Orders API\n\n- T1 orders endpoint: npm test passes\n'
+    const digest = draftDigest(md)
+    expect(isApproved(md, `${digest}\n`)).toBe(true)
+    // Whitespace at the ends does not matter; any other change does.
+    expect(isApproved(`\n${md}\n\n`, digest)).toBe(true)
+    expect(isApproved(md.replace('T1', 'T2'), digest)).toBe(false)
+    expect(isApproved(md, null)).toBe(false)
+    expect(isApproved(null, digest)).toBe(false)
+    expect(isApproved('   ', draftDigest('   '))).toBe(false)
+  })
   test('task status and wave progress', () => {
     const r = parsePlan(good, cats)
     if (!('plan' in r)) throw new Error('plan')
@@ -195,6 +208,32 @@ describe('plan', () => {
     expect(taskStatus({ dispatched: true, hasResult: false, verified: false, abandoned: false, worker: null, profile: null, phase: null, note: null })).toBe('alert')
     const passed = runView('r1', '/x', r.plan, new Set([1]), () => ({ dispatched: false, hasResult: false, verified: false, abandoned: false, worker: null, profile: null, phase: null, note: null }))
     expect(passed.current).toBe(2)
+  })
+  test('the status file a custom status line reads', () => {
+    const r = parsePlan(good, cats)
+    if (!('plan' in r)) throw new Error('plan')
+    const none = { dispatched: false, hasResult: false, verified: false, abandoned: false, worker: null, profile: null, phase: null, note: null }
+    const facts: Record<string, Partial<TaskFacts>> = { T1: { dispatched: true, hasResult: true }, T2: { dispatched: true, phase: 'blocked' } }
+    const view = runView('r1', '/x', r.plan, new Set(), id => ({ ...none, ...facts[id] }))
+    const total = view.waves.flatMap(w => w.tasks).length
+    const file = statusFile(view, new Date('2026-11-14T00:00:00Z'))
+    expect(file).toEqual({
+      version: 1,
+      run: 'r1',
+      goal: view.goal,
+      wave: 1,
+      waves: view.waves.length,
+      done: 1,
+      total,
+      alerts: 1,
+      wave_done: 1,
+      wave_total: 2,
+      line: `${'█'.repeat(Math.round((1 / total) * 6))}${'░'.repeat(6 - Math.round((1 / total) * 6))} 1/${total} ⚠1`,
+      updated_at: '2026-11-14T00:00:00.000Z',
+    })
+    // Every gate passed: nothing to show, and the mod removes the file.
+    const gates = new Set(view.waves.map(w => w.id))
+    expect(statusFile(runView('r1', '/x', r.plan, gates, () => none), new Date())).toBe(null)
   })
 })
 
@@ -294,5 +333,66 @@ describe('guards', () => {
     expect(ownerOf('src/api/x.ts', r.plan, mk({}))?.task).toBe('T1')
     expect(ownerOf('src/other.ts', r.plan, mk({}))).toBe(null)
     expect(ownerOf('src/api/x.ts', r.plan, mk({ hasResult: true }))).toBe(null)
+  })
+})
+
+describe('status', () => {
+  test('the short form: current wave in detail, other waves and idle workers folded', () => {
+    const run = {
+      id: '20261114-1200-orders',
+      dir: '/work/.omh/runs/20261114-1200-orders',
+      goal: 'Orders API',
+      current: 2,
+      waves: [
+        { id: 1, gate: 'explore done', gatePassed: true, tasks: [{ id: 'T1', title: 'map', category: 'explore', status: 'verified' as const, worker: 'w1', profile: 'go-fast', note: 'solid' }] },
+        {
+          id: 2,
+          gate: 'npm test passes',
+          gatePassed: false,
+          tasks: [
+            { id: 'T2', title: 'endpoint', category: 'deep', status: 'working' as const, worker: 'w2', profile: 'go-deepseek', note: null },
+            { id: 'T3', title: 'docs', category: 'writing', status: 'alert' as const, worker: 'w3', profile: 'go-deepseek', note: 'crashed' },
+          ],
+        },
+        { id: 3, gate: 'review clean', gatePassed: false, tasks: [{ id: 'T4', title: 'review', category: 'reviewer', status: 'pending' as const, worker: null, profile: null, note: null }] },
+      ],
+    }
+    const base = { pane: 'p', profile: 'go-fast', family: 'deepseek', agent: 'senpi' }
+    const workers = {
+      w1: newWorker({ name: 'w1', ...base }),
+      w2: { ...newWorker({ name: 'w2', ...base }), phase: 'running' as const, task: 'T2' },
+    }
+    expect(statusBrief(run, workers)).toBe(
+      [
+        'Orders API · W2/3 · 1/4 closed · ⚠1',
+        '✓ W1 gate passed (1 task)',
+        '▶ W2 0/2 — gate: npm test passes',
+        '  🔄 T2 endpoint → w2',
+        '  ❗ T3 docs → w3 · crashed',
+        '· W3 0/1',
+        'workers: w2 running, 1 idle',
+      ].join('\n'),
+    )
+    expect(statusBrief(null, {})).toBe('No run in progress. /ulw <goal> starts one.')
+  })
+})
+
+describe('tool rows', () => {
+  const T = (n: string) => `mcp__oh-my-herdr__omh_${n}`
+  test('a call shows a few fields, never the brief or plan body', () => {
+    expect(OMH_TOOL.test(T('status'))).toBe(true)
+    expect(OMH_TOOL.test('mcp__other__omh_status')).toBe(false)
+    expect(callSummary(T('dispatch'), { task: 'T3', intent: 'implement', category: 'deep', rationale: 'r', brief: 'long brief' })).toBe('T3 · implement · deep')
+    expect(callSummary(T('status'), { action: 'draft', markdown: '# Plan: gateways UI\n\n## Goal\nx' })).toBe('draft · Plan: gateways UI · 4 lines')
+    expect(callSummary(T('status'), { action: 'plan', plan: { goal: 'g', waves: [{ tasks: [1, 2] }, { tasks: [3] }] } })).toBe('plan · 2 waves, 3 tasks')
+    expect(callSummary(T('status'), { action: 'gate', wave: 2 })).toBe('gate · W2')
+    expect(callSummary(T('status'), {})).toBe('show')
+    expect(callSummary(T('teardown'), {})).toBe('all')
+  })
+  test('a result shows its first line and how many follow', () => {
+    expect(resultText([{ type: 'text', text: 'a\nb' }])).toBe('a\nb')
+    expect(resultText({ content: [{ type: 'text', text: 'x' }] })).toBe('x')
+    expect(firstLine('\nplan.md written\nNow give\nDo not')).toEqual({ line: 'plan.md written', more: 2 })
+    expect(firstLine('x'.repeat(120)).line.length).toBe(80)
   })
 })

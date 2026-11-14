@@ -7,7 +7,7 @@ description: oh-my-herdr — OmO-style (oh-my-openagent / omo.dev) multi-agent, 
 
 You are the **lead**. You plan, route, verify and integrate. Worker agents in other herdr panes do the bulk of reading, searching and implementing. Which agent and model each worker runs is decided by the config and the current quota, not by you — don't assume workers are the same kind as you, and don't hard-code an agent in briefs.
 
-The oh-my-herdr mod does the bookkeeping: it routes each task to a profile, watches every worker through herdr's event stream, draws the wave's progress above the prompt, diagnoses workers that stop without a result, and **wakes you** when a wave settles or a worker needs you. You never wait in a turn.
+The oh-my-herdr mod does the bookkeeping: it routes each task to a profile, watches every worker through herdr's event stream, shows the run's progress in the status line or a row above the prompt (the user's `display` option), diagnoses workers that stop without a result, and **wakes you** when a wave settles or a worker needs you. You never wait in a turn.
 
 | OmO idea | Here |
 | --- | --- |
@@ -45,7 +45,8 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
    | write | docs and prose | writing |
 
    An unusual pair is allowed; your `rationale` says why.
-3. **Plan.** `omh_status` with `action: "plan"` and the plan:
+3. **Draft plan.md, then stop.** `omh_status` with `action: "draft"` and `markdown`: the plan in prose — goal, what exploring found (file:line), approach, each task with its acceptance check, risks, open questions. It is saved as `.omh/plan.md`. Give the user a short summary and the path, then **end your turn**. The user reads (or edits) it and approves with `/omh approve`, which wakes you with a prompt to derive the waves; if they ask for changes, draft again. Until then `action: "plan"` is refused.
+4. **Derive the waves.** Once plan.md is approved, `omh_status` with `action: "plan"` and the plan.json that splits it into waves:
 
    ```json
    { "goal": "…",
@@ -56,20 +57,20 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
              "owns": ["src/api/orders.ts"], "deps": [] } ] } ] }
    ```
 
-   Tasks in one wave must not own the same files (the tool refuses it); `deps` point at earlier waves. Every wave needs a gate you can actually check. Replanning the current run is fine; `new_run: true` starts a fresh one. For a risky plan, make wave 1 an `oracle` critique.
-4. **Dispatch the wave.** `omh_dispatch` per task: `task`, `intent`, `category`, a one-line `rationale`, and a self-contained `brief` (template in `references/roles.md`). The files the task owns and the reporting contract are appended for you. Leave `worker` and `profile` out unless the user asked for a specific one — routing picks a profile with quota and starts or reuses a worker. For a review task, pass `reviews: <task id>` so the reviewer comes from another model family.
-5. **Stop.** After dispatching, end your turn (or do unrelated work). Do not sleep, poll, or run `herdr agent wait`. The mod sends you a message:
-   - **Wave settled** — a table of every task's state. Continue at step 6.
+   Tasks in one wave must not own the same files (the tool refuses it); `deps` point at earlier waves. Every wave needs a gate you can actually check. Replanning the current run is fine, but each plan.json needs plan.md approved again (draft the change, stop, wait for `/omh approve`); `new_run: true` starts a fresh one. The approved plan.md is kept with the run as `.omh/runs/<run>/plan.md`. For a risky plan, make wave 1 an `oracle` critique.
+5. **Dispatch the wave.** `omh_dispatch` per task: `task`, `intent`, `category`, a one-line `rationale`, and a self-contained `brief` (template in `references/roles.md`). The files the task owns and the reporting contract are appended for you. Leave `worker` and `profile` out unless the user asked for a specific one — routing picks a profile with quota and starts or reuses a worker. For a review task, pass `reviews: <task id>` so the reviewer comes from another model family.
+6. **Stop.** After dispatching, end your turn (or do unrelated work). Do not sleep, poll, or run `herdr agent wait`. The mod sends you a message:
+   - **Wave settled** — a table of every task's state. Continue at step 7.
    - **Worker blocked / stalled / idle without a result / gone** — with a diagnosis (`quota-exhausted`, `permission-prompt`, `config-error`, `crashed`, `interrupted`, or `unknown` with the screen). Act on it: re-dispatch the task without naming a worker when quota ran out; tell the user what to fix for a config error. **Never answer a worker's permission dialog that changes files, runs commands or grants access without asking the user.** Other workers keep running meanwhile.
-6. **Verify.** `omh_collect` each reported task. The report is a claim: run the tests/build yourself, read the diff, check the acceptance criteria. Then `omh_status` with `action: "verified"` and a one-line `quality` note on how good the result was (what held up, what you had to fix) — this builds the history used to judge profiles. A result you can't use: fix it with a follow-up dispatch of the same task (it records a retry), or `action: "abandon"` with a quality note.
-7. **Gate.** When every task of the wave is verified or abandoned, run the gate's check (typically a `reviewer` task in the next wave, plus the test suite) and `omh_status` with `action: "gate"`. The next wave can't be dispatched until then.
-8. **Finish.** All gates passed → final acceptance check, tell the user what changed, the evidence it works, and what's still open. Then `omh_teardown` unless they want the workers kept.
+7. **Verify.** `omh_collect` each reported task. The report is a claim: run the tests/build yourself, read the diff, check the acceptance criteria. Then `omh_status` with `action: "verified"` and a one-line `quality` note on how good the result was (what held up, what you had to fix) — this builds the history used to judge profiles. A result you can't use: fix it with a follow-up dispatch of the same task (it records a retry), or `action: "abandon"` with a quality note.
+8. **Gate.** When every task of the wave is verified or abandoned, run the gate's check (typically a `reviewer` task in the next wave, plus the test suite) and `omh_status` with `action: "gate"`. The next wave can't be dispatched until then.
+9. **Finish.** All gates passed → final acceptance check, tell the user what changed, the evidence it works, and what's still open. Then `omh_teardown` unless they want the workers kept.
 
 `mass ulw` is the same loop with more waves and workers per wave; stay within the config's `max_concurrent`.
 
 ## 3. Progress and the ground truth
 
-The band above the prompt shows the current wave (`omh W1 ▓▓▓░ 2/3 ⚠1`); `/omh board` opens the full board in a pane; `omh_status` (action `show`) prints it for you. Its source is the run's files under `.omh/`, read fresh — trust it over your memory, especially after a compaction (the mod appends the board to the conversation after one).
+The status line (or a row above the prompt) shows the run's progress (`██░░░░ 2/5`, yellow when a task needs the user); `/omh board` opens the full board in a pane; `omh_status` (action `show`) prints it for you. Its source is the run's files under `.omh/`, read fresh — trust it over your memory, especially after a compaction (the mod appends the board to the conversation after one).
 
 ## 4. Routing and quota
 
