@@ -1,5 +1,5 @@
 // The status line: the hint line under the prompt becomes one compact line —
-//   ⏵⏵ auto mode on · Opus 5.5 (high) · ~/codes/github/oh-my-herdr <branch icon> main · ███░░░░░░░ 31% · 12%/9%
+//   ⏵⏵ auto mode on · Opus 5.5 · ~/codes/github/oh-my-herdr <branch icon> main · ███░░░░░░░ 31% · 12%/9%
 // The engine draws its mode pill ("⏵⏵ auto mode on") itself, outside the hint; everything after it
 // is this line, with what else the engine says there (esc to interrupt, …) kept at the end.
 //
@@ -84,42 +84,16 @@ export function levelColor(percent: number): string {
   return 'success'
 }
 
-const LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
-
-/** The level named in /effort's arguments or in its answer ("Set effort level to high …"); null when none is. */
-export function effortFrom(text: string): string | null {
-  const t = text.trim().toLowerCase()
-  if ((LEVELS as readonly string[]).includes(t)) return t
-  const m = /effort level to (low|medium|high|xhigh|max)\b/i.exec(text)
-  return m ? m[1]!.toLowerCase() : null
-}
-
 // ------------------------------------------------------------------ the session's figures
-
-// The effort the last request went out with (or /effort set); the settings' level until one has.
-let effort: string | null = null
-
-export function noteEffort(level: string | number | undefined | null): void {
-  if (typeof level === 'string') effort = level
-  else if (typeof level === 'number') effort = String(level)
-}
 
 async function refresh($: EngineInterface): Promise<void> {
   const [cwd, model, usage, home] = await Promise.all([$.session.cwd(), $.session.model(), $.session.usage(), $.env.get('HOME')])
   // A reload clears the module's variables; the line drawn before it still knows.
   const before = await read($, STATUSBAR)
-  if (effort === null) effort = before?.effort ?? null
-  if (effort === null) {
-    const fromEnv = await $.env.get('CLAUDE_CODE_EFFORT_LEVEL')
-    const fromSettings = await $.settings.read({ key: 'effortLevel' }).catch(() => undefined)
-    const level = fromEnv && fromEnv !== 'auto' && fromEnv !== 'unset' ? fromEnv : typeof fromSettings === 'string' ? fromSettings : null
-    if (level !== null) effort = level
-  }
   const info: OmhStatusbar = {
     cwd: shortPath(cwd, home),
     branch: await branchOf($, cwd),
     model: prettyModel(model),
-    effort,
     contextPercent: usage.context.percent ?? null,
     limits: limitsOf(usage.rateLimits, before?.limits ?? []),
   }
@@ -165,12 +139,7 @@ export async function statusbarLine($: EngineInterface, e: { props: { hint: stri
     if (parts.length > 0) parts.push(<Text dimColor> · </Text>)
     parts.push(node)
   }
-  add(
-    <Text color="claude">
-      {info.model}
-      {info.effort !== null ? <Text dimColor> ({info.effort})</Text> : ''}
-    </Text>,
-  )
+  add(<Text color="claude">{info.model}</Text>)
   add(
     <Text>
       <Text color="suggestion">{info.cwd}</Text>

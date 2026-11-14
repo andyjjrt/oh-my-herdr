@@ -62,7 +62,6 @@ export type OmhStatusbar = {
   /** The checked-out branch, a short commit id when detached; null outside a git repository. */
   branch: string | null
   model: string
-  effort: string | null
   contextPercent: number | null
   limits: { kind: string; percent: number }[]
 }

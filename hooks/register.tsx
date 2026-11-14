@@ -11,7 +11,7 @@ import { Paths } from './lib/files'
 import { ownerOf, relativeTo } from './lib/guards'
 import { loadPlan, config, flushWake, optionsOf, reconcile, refreshQuota, refreshRun, rt, workers } from './lib/runtime'
 import { ACTIVE } from './lib/settle'
-import { effortFrom, noteEffort, refreshStatusbar, statusbarLine } from './lib/statusbar'
+import { refreshStatusbar, statusbarLine } from './lib/statusbar'
 import { statusText, ulwPrompt } from './lib/text'
 
 // The same refs as hooks/lib/engine.ts: a read must name a const of its own file, and a read made
@@ -261,16 +261,10 @@ export const register: Register = (on, options) => {
 
   // ---------------------------------------------------------------- status line (every session)
 
-  on('turn.step', async function* ($, e, next) {
-    if (rt.options.statusbar) noteEffort(e.effort)
-    return yield* next(e)
-  })
-
-  // /effort and /model change what the line shows without a turn: redraw right after them.
-  on('command.run', { command: ['effort', 'model'] }, async ($, e, next) => {
+  // /model changes what the line shows without a turn: redraw right after it.
+  on('command.run', { command: 'model' }, async ($, e, next) => {
     const done = await next(e)
     if (!rt.options.statusbar) return done
-    if (e.command === 'effort') noteEffort(effortFrom(e.args) ?? effortFrom(done.text ?? ''))
     refreshStatusbar($)
     return done
   }).catch(($, e, next) => next(e))

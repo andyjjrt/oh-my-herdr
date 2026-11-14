@@ -17,7 +17,7 @@
     "statusbar": {
       "type": "boolean",
       "title": "Status line",
-      "description": "Turn the hint line under the prompt into one compact line: model (effort), folder and git branch, context bar, 5-hour/weekly usage. Works in every session, not only in herdr.",
+      "description": "Turn the hint line under the prompt into one compact line: model, folder and git branch, context bar, 5-hour/weekly usage. Works in every session, not only in herdr.",
       "default": true
     },
     "wakeOnSettle": {

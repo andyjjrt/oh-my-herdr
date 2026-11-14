@@ -79,15 +79,13 @@ The `herdr` skill is copied unmodified from [herdrdev/herdr](https://github.com/
 
 The mod also replaces the hint line under the prompt with a compact status line. **It works in every session**, not only inside herdr:
 
-```
-⏵⏵ auto mode on · Opus 5.5 (high) · ~/codes/github/oh-my-herdr  main · ███░░░░░░░ 31% · 68%/9%
-```
+![](assets/statusline.png)
 
-From left to right: model and effort, folder and git branch, context usage bar, and Claude subscription usage (5-hour / weekly). Usage is green, turns yellow at 70% and red at 90%.
+From left to right: model, folder and git branch, context usage bar, and Claude subscription usage (5-hour / weekly). Usage is green, turns yellow at 70% and red at 90%.
 
 - The branch icon is a Nerd Font glyph; without a Nerd Font it shows as a box.
 - The leading "⏵⏵ auto mode on" is drawn by Claude Code itself; the mod can't change it.
-- It refreshes at session start, after each reply, after `/effort`, `/model`, and compaction.
+- It refreshes at session start, after each reply, after `/model`, and after compaction.
 - To turn it off, disable `statusbar` in `/plugin`.
 
 ## Configuration

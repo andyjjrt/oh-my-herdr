@@ -2,7 +2,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { contextBar as bar, effortFrom, limitsOf, prettyModel, shortPath, splitHint } from '../hooks/lib/statusbar'
+import { contextBar as bar, limitsOf, prettyModel, shortPath, splitHint } from '../hooks/lib/statusbar'
 
 describe('pieces', () => {
   test('the mode pill becomes one icon; the rest of the line stays', () => {
@@ -34,12 +34,6 @@ describe('pieces', () => {
     expect(shortPath('/home/u/a/very/long/path/that/goes/on/and/on/project', '/home/u').length).toBeLessThanOrEqual(32)
     expect(shortPath('/home/u/a/very/long/path/that/goes/on/and/on/project', '/home/u').endsWith('/project')).toBe(true)
   })
-  test('the level /effort set', () => {
-    expect(effortFrom('high')).toBe('high')
-    expect(effortFrom('')).toBe(null)
-    expect(effortFrom('Set effort level to high (saved as your default for new sessions): Comprehensive …')).toBe('high')
-    expect(effortFrom('auto')).toBe(null)
-  })
   test('quota figures survive a response without rate-limit headers', () => {
     const last = [{ kind: 'five_hour', percent: 70 }, { kind: 'seven_day', percent: 9 }]
     expect(limitsOf([], last)).toEqual(last)
@@ -66,7 +60,6 @@ const INFO = {
   cwd: '~/codes/github/oh-my-herdr',
   branch: 'main',
   model: 'Opus 5.5',
-  effort: 'high',
   contextPercent: 31,
   limits: [
     { kind: 'five_hour', percent: 12 },
@@ -79,7 +72,7 @@ test('the line on terminal and desktop', async ($, on) => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...HINT, surface } as never)
     const line = await ui.find({ type: 'Text', text: /Opus 5\.5/ })
-    expect(line?.text).toBe('⏵ Opus 5.5 (high) · ~/codes/github/oh-my-herdr  main · ███░░░░░░░ 31% · 12%/93%')
+    expect(line?.text).toBe('⏵ Opus 5.5 · ~/codes/github/oh-my-herdr  main · ███░░░░░░░ 31% · 12%/93%')
     // The line replaces the engine's on purpose; its mode pill and hints are folded in.
     expect(await ui.keepsBeneath()).toBe(false)
     await ui.unmount()
