@@ -2,6 +2,7 @@
 // The parsers and the evaluation are pure (tested against real responses in tests/fixtures/quota);
 // `probe` is the part that reaches the network and credential files through `$`.
 
+import { table } from './md'
 import type { Engine } from './engine'
 
 import type { OmhQuota, OmhQuotaWindow } from '../../types'
@@ -64,6 +65,8 @@ export function providerOf(profile: Profile): Provider | null {
   if (profile.quota !== undefined) {
     return PROVIDERS.includes(profile.quota as Provider) ? (profile.quota as Provider) : null
   }
+  // A subagent runs on the lead's own Claude login.
+  if (profile.subagentType !== undefined) return 'claude'
   const args = profile.args.join(' ')
   if (/opencode-go/.test(args)) return 'opencode-go'
   if (/anthropic-subscription|--provider[ =]anthropic\b|(^| )anthropic\//.test(args)) return 'claude'
@@ -190,16 +193,19 @@ export async function probe($: Engine, provider: Provider): Promise<OmhQuota> {
   }
 }
 
+const QUOTA_MARK: Record<string, string> = { ok: '✅ ok', exhausted: '⛔ exhausted', unknown: '❔ unknown' }
+
+/** /omh quota (and the quota part of /omh check): one line of settings, then a table. */
 export function formatQuota(cfg: Config, quota: Record<string, OmhQuota>): string {
-  const lines = [`threshold ${cfg.quota.threshold}%   cache ${cfg.quota.cacheSeconds}s   on_unknown=${cfg.quota.onUnknown}`]
-  for (const p of PROVIDERS) {
-    if (cfg.quota.providers[p]?.enabled === false) {
-      lines.push(`  ${p.padEnd(12)} disabled`)
-      continue
-    }
+  const rows = PROVIDERS.map(p => {
+    if (cfg.quota.providers[p]?.enabled === false) return [p, '· disabled', '', '']
     const q = quota[p]
     const e = evaluate(q, cfg.quota.threshold, '')
-    lines.push(`  ${p.padEnd(12)} ${e.status.padEnd(10)} ${e.reason}${q?.source ? `   [via ${q.source}]` : ''}`)
-  }
-  return lines.join('\n')
+    return [p, QUOTA_MARK[e.status] ?? e.status, e.reason, q?.source ?? '']
+  })
+  return [
+    `Quota · skip a provider at ${cfg.quota.threshold}% · cached ${cfg.quota.cacheSeconds}s · unknown usage: ${cfg.quota.onUnknown}`,
+    '',
+    table(['Provider', 'Status', 'Usage', 'Read via'], rows),
+  ].join('\n')
 }

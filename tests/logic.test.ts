@@ -5,12 +5,18 @@ import { describe, expect, test } from 'claude-code/testing'
 import { normalizeConfig } from '../hooks/lib/config'
 import { diagnose } from '../hooks/lib/diagnose'
 import { ownerOf, relativeTo } from '../hooks/lib/guards'
-import { draftDigest, findTask, isApproved, parsePlan, runView, statusFile, taskStatus, waveProgress, type TaskFacts } from '../hooks/lib/plan'
-import { evaluate, parseClaude, parseOpencodeGo, providerOf, quotaAllows } from '../hooks/lib/quota'
+import { draftDigest, findTask, isApproved, isScout, parsePlan, SCOUT_ID, runView, statusFile, taskStatus, waveProgress, type TaskFacts } from '../hooks/lib/plan'
+import { evaluate, formatQuota, parseClaude, parseOpencodeGo, providerOf, quotaAllows } from '../hooks/lib/quota'
+import { cell, table } from '../hooks/lib/md'
 import { isUsualPair, pickProfile } from '../hooks/lib/route'
 import { newWorker, step, type SettleFacts } from '../hooks/lib/settle'
-import { statusBrief } from '../hooks/lib/text'
+import { scoutsText, statusBrief, statusText, ulwPrompt } from '../hooks/lib/text'
+import { planViewerLine } from '../hooks/lib/actions'
 import { callSummary, firstLine, OMH_TOOL, resultText } from '../hooks/lib/toolrow'
+import { drawMarkdown, hasPrismantis, looksLikeMarkdown, splitCollected } from '../hooks/lib/prismantis'
+import { endStatusOf, isSubagentWorker, settleStatusOf, subagentIdOf, subagentPane, subagentScreen } from '../hooks/lib/subagent'
+import { configProblems, isSubagentProfile } from '../hooks/lib/config'
+import { place } from '../hooks/lib/layout'
 import type { OmhQuota } from '../types'
 import { CLAUDE_USAGE, OPENCODE_GO_USAGE } from './fixtures/quota'
 
@@ -162,6 +168,16 @@ describe('plan', () => {
     const r = parsePlan(good, cats)
     expect('plan' in r).toBe(true)
     if ('plan' in r) expect(findTask(r.plan, 'T1')?.task.owns).toEqual(['src/api'])
+  })
+  test('the scout- prefix is reserved for scouts', () => {
+    const bad = { goal: 'x', waves: [{ id: 1, gate: 'g', tasks: [{ id: 'scout-api', intent: 'explore', category: 'explore' }] }] }
+    const r = parsePlan(bad, cats)
+    expect('errors' in r && r.errors.join('\n')).toContain('reserved for scouts')
+    expect(isScout('scout-api')).toBe(true)
+    expect(isScout('T1')).toBe(false)
+    expect(SCOUT_ID.test('scout-api.v2')).toBe(true)
+    expect(SCOUT_ID.test('scout-')).toBe(false)
+    expect(SCOUT_ID.test('scout-a/b')).toBe(false)
   })
   test('rejects overlapping ownership in one wave', () => {
     const bad = { ...good, waves: [{ id: 1, gate: 'g', tasks: [
@@ -364,16 +380,206 @@ describe('status', () => {
     }
     expect(statusBrief(run, workers)).toBe(
       [
-        'Orders API · W2/3 · 1/4 closed · ⚠1',
-        '✓ W1 gate passed (1 task)',
-        '▶ W2 0/2 — gate: npm test passes',
-        '  🔄 T2 endpoint → w2',
-        '  ❗ T3 docs → w3 · crashed',
-        '· W3 0/1',
-        'workers: w2 running, 1 idle',
+        '**Orders API** · W2/3 · 1/4 closed · ⚠ 1',
+        '',
+        '- ✓ W1 gate passed (1 task)',
+        '- ▶ **W2** 0/2 · gate: npm test passes',
+        '  - 🔄 T2 endpoint → w2',
+        '  - ❗ T3 docs → w3 · crashed',
+        '- · W3 0/1',
+        '',
+        'Workers: w2 running, 1 idle',
       ].join('\n'),
     )
     expect(statusBrief(null, {})).toBe('No run in progress. /ulw <goal> starts one.')
+  })
+})
+
+describe('scouts and ulw', () => {
+  test('the scouts wake-up lists each scout and what to do next', () => {
+    const text = scoutsText([
+      { id: 'scout-api', worker: 'scout-api (go-fast)', state: 'reported', detail: 'result.md written' },
+      { id: 'scout-docs', worker: 'scout-docs (go-fast)', state: 'idle-no-result', detail: 'crashed: a|b' },
+    ])
+    expect(text).toContain('| scout-api | scout-api (go-fast) | reported | result.md written |')
+    expect(text).toContain('crashed: a/b')
+    expect(text).toContain('`omh_collect` each one (scout-api)')
+    expect(text).toContain('Without a report: scout-docs')
+  })
+  test('the ulw prompt invites parallel Explore subagents and scouts', () => {
+    const text = ulwPrompt('orders')
+    expect(text).toContain('Goal: orders')
+    expect(text).toContain('`Explore`')
+    expect(text).toContain('scout-<name>')
+  })
+})
+
+describe('plan preview', () => {
+  test('tries leaf, glow, bat, then less, and quotes the path', () => {
+    const line = planViewerLine("/work/my repo/.omh/plan.md")
+    const order = ['leaf --watch', 'glow -p', 'bat --paging=always', 'less -R'].map(x => line.indexOf(x))
+    expect(order.every(i => i >= 0)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+    expect(line).toContain("'/work/my repo/.omh/plan.md'")
+    expect(line.endsWith('exit')).toBe(true)
+  })
+})
+
+describe('markdown answers', () => {
+  test('cells never break a row', () => {
+    expect(cell('a | b\nc')).toBe('a \\| b c')
+    expect(cell('')).toBe(' ')
+    expect(table(['A', 'B'], [['1', 'x|y']])).toBe('| A | B |\n|---|---|\n| 1 | x\\|y |')
+  })
+
+  test('/omh quota: a settings line, then a table a plugin prefix cannot break', () => {
+    const now = Date.now()
+    const q: Record<string, OmhQuota> = {
+      claude: { provider: 'claude', checkedAt: now, windows: [{ name: '5h', usedPercent: 57, resetsAt: null, scope: null }], limitReached: false, error: null, source: 'Claude Code' },
+    }
+    const lines = formatQuota(CFG, q).split('\n')
+    expect(lines[0]).toBe('Quota · skip a provider at 95% · cached 120s · unknown usage: allow')
+    expect(lines[1]).toBe('')
+    expect(lines[2]).toBe('| Provider | Status | Usage | Read via |')
+    expect(lines.find(l => l.startsWith('| claude |'))).toContain('| ✅ ok | 5h 57%')
+    expect(lines.find(l => l.startsWith('| claude |'))).toContain('| Claude Code |')
+  })
+
+  test('the full board is a table per wave and one of workers', () => {
+    const run = {
+      id: 'r1', dir: '/w/.omh/runs/r1', goal: 'Orders API', current: 1,
+      waves: [{ id: 1, gate: 'tests pass', gatePassed: false, tasks: [{ id: 'T1', title: 'a | b', category: 'quick', status: 'working' as const, worker: 'w1', profile: 'sub-haiku', note: null }] }],
+    }
+    const w1 = { ...newWorker({ name: 'w1', pane: 'agent:ag1', profile: 'sub-haiku', family: 'claude', agent: 'subagent' }), phase: 'running' as const, task: 'T1' }
+    const text = statusText(run, { w1 })
+    expect(text.split('\n')[0]).toBe('Run `r1`: Orders API')
+    expect(text).toContain('### Wave 1 · 0/1 closed · ◀ current')
+    expect(text).toContain('| 🔄 T1 | working | a \\| b | w1 (sub-haiku) |')
+    expect(text).toContain('| w1 | running | sub-haiku | claude | ◆ subagent ag1 | T1 |')
+  })
+})
+
+describe('worker pane layout', () => {
+  const tab = (id: string, count: number | null, freeRoot: string | null = null) => ({ tab: id, freeRoot, count, lastPane: count ? `${id}:last` : null })
+  test('no tab yet: open omh-workers', () => {
+    expect(place([], 4)).toEqual({ kind: 'new-tab', label: 'omh-workers' })
+  })
+  test('a fresh tab hands out its root pane first', () => {
+    expect(place([tab('t1', 1, 'w1:p9')], 4)).toEqual({ kind: 'root', tab: 't1', pane: 'w1:p9' })
+  })
+  test('then splits the last pane, right and down in turn', () => {
+    expect(place([tab('t1', 1)], 4)).toEqual({ kind: 'split', tab: 't1', anchor: 't1:last', direction: 'right' })
+    expect(place([tab('t1', 2)], 4)).toEqual({ kind: 'split', tab: 't1', anchor: 't1:last', direction: 'down' })
+    expect(place([tab('t1', 3)], 4)).toEqual({ kind: 'split', tab: 't1', anchor: 't1:last', direction: 'right' })
+  })
+  test('a full tab sends the next worker to the next tab with room, else a new one', () => {
+    expect(place([tab('t1', 4), tab('t2', 2)], 4)).toEqual({ kind: 'split', tab: 't2', anchor: 't2:last', direction: 'down' })
+    expect(place([tab('t1', 4)], 4)).toEqual({ kind: 'new-tab', label: 'omh-workers-2' })
+    expect(place([tab('t1', 4), tab('t2', 4)], 4)).toEqual({ kind: 'new-tab', label: 'omh-workers-3' })
+  })
+  test('room freed by a torn-down worker is used again; a closed tab is skipped', () => {
+    expect(place([tab('t1', 3), tab('t2', 4)], 4).kind === 'split' && (place([tab('t1', 3), tab('t2', 4)], 4) as any).tab).toBe('t1')
+    expect(place([tab('t1', null), tab('t2', 1)], 4)).toEqual({ kind: 'split', tab: 't2', anchor: 't2:last', direction: 'right' })
+    expect(place([tab('t1', null)], 4)).toEqual({ kind: 'new-tab', label: 'omh-workers' })
+  })
+  test('a cap of 1 gives every worker a tab of its own', () => {
+    expect(place([tab('t1', 1)], 1)).toEqual({ kind: 'new-tab', label: 'omh-workers-2' })
+    expect(place([tab('t1', 1)], 0)).toEqual({ kind: 'new-tab', label: 'omh-workers-2' })
+  })
+})
+
+describe('subagent workers', () => {
+  const SUB_CFG = normalizeConfig(
+    '/cfg/config.json',
+    {
+      profiles: {
+        'sub-explore': { agent: 'subagent', family: 'claude', subagent_type: 'Explore', model: 'haiku' },
+        'sub-any': { agent: 'subagent', family: 'claude' },
+        'go-fast': { agent: 'senpi', family: 'deepseek', args: ['--provider', 'opencode-go'] },
+      },
+      categories: { explore: ['sub-explore', 'go-fast'] },
+    },
+    { ...AGENTS, subagent: { launch: 'subagent' } },
+  )
+
+  test('a subagent profile reads its model and type, defaults the type, and bills claude', () => {
+    expect(SUB_CFG.agents.subagent!.launch).toBe('subagent')
+    expect(SUB_CFG.profiles['sub-explore']).toEqual({ agent: 'subagent', family: 'claude', args: [], model: 'haiku', subagentType: 'Explore' })
+    expect(SUB_CFG.profiles['sub-any']!.subagentType).toBe('general-purpose')
+    expect(SUB_CFG.profiles['go-fast']!.subagentType).toBe(undefined)
+    expect(isSubagentProfile(SUB_CFG, 'sub-explore')).toBe(true)
+    expect(isSubagentProfile(SUB_CFG, 'go-fast')).toBe(false)
+    expect(providerOf(SUB_CFG.profiles['sub-explore']!)).toBe('claude')
+    expect(configProblems(SUB_CFG)).toEqual([])
+  })
+
+  test('routing takes a subagent first, and skips it when Claude is out of quota', () => {
+    const first = pickProfile(SUB_CFG, 'explore', { intent: 'explore', avoidFamilies: [], quotaOk: () => true })
+    expect(first.ok && first.profile).toBe('sub-explore')
+    const out = pickProfile(SUB_CFG, 'explore', { intent: 'explore', avoidFamilies: [], quotaOk: p => (isSubagentProfile(SUB_CFG, p) ? 'claude at 97%' : true) })
+    expect(out.ok && out.profile).toBe('go-fast')
+  })
+
+  test('the pane spells the agent id', () => {
+    const w = newWorker({ name: 'scout-a', pane: subagentPane('a1b2'), profile: 'sub-explore', family: 'claude', agent: 'subagent' })
+    expect(isSubagentWorker(w)).toBe(true)
+    expect(subagentIdOf(w)).toBe('a1b2')
+    expect(subagentIdOf({ pane: 'w1:p3' })).toBe(null)
+  })
+
+  test('agent statuses and end reasons map onto the state machine', () => {
+    expect(['pending', 'running', 'waiting', 'idle', 'completed', 'failed', 'killed', undefined, 'odd'].map(settleStatusOf)).toEqual([
+      'working', 'working', 'blocked', 'done', 'done', 'gone', 'gone', 'gone', 'unknown',
+    ])
+    expect(endStatusOf('answer')).toBe('done')
+    expect(endStatusOf('aborted')).toBe('gone')
+  })
+
+  test('a subagent that ends without a report finishes as checking, then alerts; one with a report finishes', () => {
+    const w = newWorker({ name: 's', pane: subagentPane('x'), profile: 'sub-any', family: 'claude', agent: 'subagent' })
+    const facts = (hasResult: boolean): SettleFacts => ({ hasResult, stallMs: 30_000, graceMs: 45_000 })
+    let s = step(w, { kind: 'dispatch', at: 0, task: 'scout-a', run: '_scouts' }, facts(false))
+    s = step(s.worker, { kind: 'status', status: 'working', at: 1 }, facts(false))
+    const done = step(s.worker, { kind: 'status', status: endStatusOf('answer'), at: 2 }, facts(true))
+    expect(done.worker.phase).toBe('finished')
+    const dead = step(s.worker, { kind: 'status', status: endStatusOf('aborted'), at: 2 }, facts(false))
+    expect(dead.worker.phase).toBe('gone')
+    expect(dead.effects).toEqual([{ type: 'alert', phase: 'gone' }])
+  })
+
+  test('diagnosis reads the end reason and the answer instead of a screen', () => {
+    const at = 1
+    const base = { agent: 'subagent', phase: 'gone' as const, hasResult: false, quotaExhausted: null, at }
+    expect(diagnose({ ...base, screen: subagentScreen({ reason: 'aborted', answer: '' }, undefined) }).verdict).toBe('interrupted')
+    expect(diagnose({ ...base, screen: subagentScreen({ reason: 'error', answer: 'API Error' }, 'failed') }).verdict).toBe('crashed')
+    expect(diagnose({ ...base, screen: subagentScreen({ reason: 'answer', answer: "You've hit your limit · resets 5pm" }, 'completed') }).verdict).toBe('quota-exhausted')
+    expect(diagnose({ ...base, phase: 'blocked', screen: subagentScreen(undefined, 'waiting') }).verdict).toBe('permission-prompt')
+    expect(diagnose({ ...base, screen: subagentScreen({ reason: 'answer', answer: 'BLOCKED: no access to the repo' }, 'completed') }).evidence).toContain('BLOCKED')
+  })
+})
+
+describe('prismantis', () => {
+  test('a collected report splits into header, body and closing note', () => {
+    const parts = splitCollected('===== T1 (/r/T1/result.md) =====\n## Done\n\n| a | b |\n|---|---|\n| 1 | 2 |\n=====\nThis report is the claim.')
+    expect(parts).toEqual({ header: 'T1 (/r/T1/result.md)', body: '## Done\n\n| a | b |\n|---|---|\n| 1 | 2 |', footer: 'This report is the claim.' })
+    expect(splitCollected('dispatched T3 to w2')).toBe(null)
+  })
+  test('only tables, fences and headings count as markdown', () => {
+    expect(looksLikeMarkdown('| Task | Status |\n|---|---|\n| T1 | done |')).toBe(true)
+    expect(looksLikeMarkdown('x\n```ts\ncode\n```')).toBe(true)
+    expect(looksLikeMarkdown('## Findings')).toBe(true)
+    expect(looksLikeMarkdown('Run r1 — goal\n  ✅ T1         verified  title')).toBe(false)
+    expect(looksLikeMarkdown('a | b')).toBe(false)
+  })
+  test('absent prismantis draws nothing; present, its drawing comes back', async () => {
+    expect(await drawMarkdown({} as never, 'terminal', '# x', 80)).toBe(null)
+    expect(await hasPrismantis({} as never, 'terminal')).toBe(false)
+    const seen: { columns: number }[] = []
+    const fake = { prismantis: { markdown: async (a: { columns: number }) => (seen.push(a), 'drawn') } }
+    expect(await drawMarkdown(fake as never, 'terminal', '# x', 4)).toBe('drawn')
+    expect(seen[0]!.columns).toBe(20)
+    expect(await drawMarkdown(fake as never, 'terminal', '  ', 80)).toBe(null)
+    expect(await hasPrismantis({ prismantis: { markdown: async () => undefined } } as never, 'terminal')).toBe(false)
   })
 })
 

@@ -1,6 +1,8 @@
 // What the lead reads: wake-up messages, the status summary, the /ulw opening prompt. Pure.
 
 import type { OmhDiagnosis, OmhRunView, OmhTaskStatus, OmhWaveView, OmhWorker } from '../../types'
+import { code, table } from './md'
+import { isSubagentWorker, subagentIdOf } from './subagent'
 
 const ICON: Record<OmhTaskStatus, string> = {
   pending: '⏳',
@@ -54,56 +56,63 @@ export function settleText(run: OmhRunView, wave: OmhWaveView, workers: Record<s
   ].join('\n')
 }
 
+/** The full board, for the lead (omh_status show, after a compaction) and /omh status full. */
 export function statusText(run: OmhRunView | null, workers: Record<string, OmhWorker>): string {
-  const lines: string[] = []
+  const out: string[] = []
   if (run === null) {
-    lines.push('No run in progress. Start one with /ulw <goal>, or write a plan with omh_status action "plan".')
+    out.push('No run in progress. Start one with /ulw <goal>, or write a plan with omh_status action "plan".')
   } else {
-    lines.push(`Run ${run.id} — ${run.goal}`, `dir: ${run.dir}`, '')
+    out.push(`Run ${code(run.id)}: ${run.goal}`, '', `dir ${code(run.dir)}`)
     for (const w of run.waves) {
       const done = w.tasks.filter(t => t.status === 'verified' || t.status === 'abandoned').length
-      const mark = w.gatePassed ? '✅ gate passed' : w.id === run.current ? '◀ current' : ''
-      lines.push(`Wave ${w.id} (${done}/${w.tasks.length} closed) ${mark} — gate: ${w.gate}`)
-      for (const t of w.tasks) {
-        lines.push(`  ${ICON[t.status]} ${t.id.padEnd(10)} ${t.status.padEnd(9)} ${t.title}${t.worker ? ` → ${t.worker}${t.profile ? ` (${t.profile})` : ''}` : ''}${t.note ? ` — ${t.note}` : ''}`)
-      }
+      const mark = w.gatePassed ? ' · ✅ gate passed' : w.id === run.current ? ' · ◀ current' : ''
+      out.push('', `### Wave ${w.id} · ${done}/${w.tasks.length} closed${mark}`, '', `Gate: ${w.gate}`, '')
+      out.push(
+        table(
+          ['Task', 'Status', 'Title', 'Worker', 'Note'],
+          w.tasks.map(t => [`${ICON[t.status]} ${t.id}`, t.status, t.title, t.worker ? `${t.worker}${t.profile ? ` (${t.profile})` : ''}` : '', t.note ?? '']),
+        ),
+      )
     }
   }
   const ws = Object.values(workers)
   if (ws.length > 0) {
-    lines.push('', 'Workers:')
-    for (const w of ws) {
-      lines.push(`  ${w.name.padEnd(14)} ${w.phase.padEnd(14)} ${w.profile} [${w.family}] pane ${w.pane}${w.task ? ` task ${w.task}` : ''}${w.diagnosis ? ` — ${w.diagnosis.verdict}` : ''}`)
-    }
+    out.push('', '### Workers', '')
+    out.push(
+      table(
+        ['Worker', 'Phase', 'Profile', 'Family', 'Where', 'Task', 'Diagnosis'],
+        ws.map(w => [w.name, w.phase, w.profile, w.family, isSubagentWorker(w) ? `◆ subagent ${subagentIdOf(w)}` : `pane ${w.pane}`, w.task ?? '', w.diagnosis?.verdict ?? '']),
+      ),
+    )
   }
-  return lines.join('\n')
+  return out.join('\n')
 }
 
 /**
  * /omh status for a person: the current wave in detail, every other wave on one line, and only the
- * workers that are busy or in trouble. The full table (run dir, profiles, panes) is `/omh status full`
+ * workers that are busy or in trouble. The full board (run dir, profiles, panes) is `/omh status full`
  * and what the lead reads.
  */
 export function statusBrief(run: OmhRunView | null, workers: Record<string, OmhWorker>): string {
-  const lines: string[] = []
+  const out: string[] = []
   if (run === null) {
-    lines.push('No run in progress. /ulw <goal> starts one.')
+    out.push('No run in progress. /ulw <goal> starts one.')
   } else {
     const all = run.waves.flatMap(w => w.tasks)
     const closed = all.filter(t => t.status === 'verified' || t.status === 'abandoned').length
     const trouble = all.filter(t => t.status === 'alert' || t.status === 'blocked').length
     const at = run.current === null ? 'done' : `W${run.current}/${run.waves.length}`
-    lines.push(`${run.goal} · ${at} · ${closed}/${all.length} closed${trouble > 0 ? ` · ⚠${trouble}` : ''}`)
+    out.push(`**${run.goal}** · ${at} · ${closed}/${all.length} closed${trouble > 0 ? ` · ⚠ ${trouble}` : ''}`, '')
     for (const w of run.waves) {
       const done = w.tasks.filter(t => t.status === 'verified' || t.status === 'abandoned').length
       if (w.id !== run.current) {
-        lines.push(w.gatePassed ? `✓ W${w.id} gate passed (${w.tasks.length} task${w.tasks.length === 1 ? '' : 's'})` : `· W${w.id} ${done}/${w.tasks.length}`)
+        out.push(w.gatePassed ? `- ✓ W${w.id} gate passed (${w.tasks.length} task${w.tasks.length === 1 ? '' : 's'})` : `- · W${w.id} ${done}/${w.tasks.length}`)
         continue
       }
-      lines.push(`▶ W${w.id} ${done}/${w.tasks.length} — gate: ${w.gate}`)
+      out.push(`- ▶ **W${w.id}** ${done}/${w.tasks.length} · gate: ${w.gate}`)
       for (const t of w.tasks) {
         const who = t.worker && (t.status === 'working' || t.status === 'blocked' || t.status === 'alert') ? ` → ${t.worker}` : ''
-        lines.push(`  ${ICON[t.status]} ${t.id} ${t.title}${who}${t.note && t.status !== 'verified' ? ` · ${t.note}` : ''}`)
+        out.push(`  - ${ICON[t.status]} ${t.id} ${t.title}${who}${t.note && t.status !== 'verified' ? ` · ${t.note}` : ''}`)
       }
     }
   }
@@ -111,11 +120,31 @@ export function statusBrief(run: OmhRunView | null, workers: Record<string, OmhW
   const shown = ws.filter(w => w.phase !== 'idle')
   const idle = ws.length - shown.length
   if (ws.length > 0) {
-    const bits = shown.map(w => `${w.name} ${w.diagnosis ? w.diagnosis.verdict : w.phase}`)
+    const bits = shown.map(w => `${isSubagentWorker(w) ? '◆' : ''}${w.name} ${w.diagnosis ? w.diagnosis.verdict : w.phase}`)
     if (idle > 0) bits.push(`${idle} idle`)
-    lines.push(`workers: ${bits.join(', ')}`)
+    out.push('', `Workers: ${bits.join(', ')}`)
   }
-  return lines.join('\n')
+  return out.join('\n')
+}
+
+export type ScoutRow = { id: string; worker: string; state: string; detail: string }
+
+/** Every scout out is back (or stuck): what the lead reads before planning on. */
+export function scoutsText(rows: readonly ScoutRow[]): string {
+  const reported = rows.filter(r => r.state === 'reported').map(r => r.id)
+  const other = rows.filter(r => r.state !== 'reported').map(r => r.id)
+  return [
+    '[oh-my-herdr] Scouts are back: no scout is still busy.',
+    '',
+    '| Scout | Worker | State | Detail |',
+    '|---|---|---|---|',
+    ...rows.map(r => `| ${r.id} | ${r.worker} | ${r.state} | ${r.detail.replace(/\|/g, '/').slice(0, 120)} |`),
+    '',
+    'Next:',
+    ...(reported.length > 0 ? [`- \`omh_collect\` each one (${reported.join(', ')}); collecting closes the scout and frees its worker. Spot-check the file:line evidence before you rely on it.`] : []),
+    ...(other.length > 0 ? [`- Without a report: ${other.join(', ')}. Dispatch it again, or \`omh_status\` action \`abandon\` with a one-line quality note.`] : []),
+    '- Then keep planning: send more scouts if something is still unclear, or draft plan.md (`omh_status` action `draft`) and end your turn for the user\'s approval.',
+  ].join('\n')
 }
 
 export function ulwPrompt(goal: string): string {
@@ -123,7 +152,9 @@ export function ulwPrompt(goal: string): string {
     `ulw — ultrawork with oh-my-herdr. Goal: ${goal.trim() || '(ask me what the goal is)'}`,
     '',
     'Run the oh-my-herdr loop with the `mcp__oh-my-herdr__*` tools:',
-    '1. Explore enough to plan (read code yourself or dispatch `explore` tasks).',
+    '1. Explore enough to plan, in parallel. Read the entry points yourself, and fan the rest out — this ulw is my explicit request for helpers, so use them:',
+    '   - Claude Code subagents: several `Explore` (or `Plan`) agents via the Agent tool, launched in ONE message so they run at once, each owning a different area and returning file:line evidence. Best for quick look-ups; they come back within this turn.',
+    '   - herdr scouts: `omh_dispatch` with a task id `scout-<name>`, intent `explore` or `research`, before any plan exists. They run read-only on routed (cheaper) models in worker panes; best for long reads and external docs. After dispatching them END YOUR TURN: you are woken when they are all back, then `omh_collect` each.',
     '2. Intent Gate: for every task decide its intent (explore, research, implement, fix, review, plan, write) and category.',
     '3. Draft the plan in prose with `omh_status` action `draft` (plan.md: goal, findings with file:line, approach, tasks with acceptance checks, risks, open questions). Summarise it for me and END YOUR TURN: I read it and approve it with /omh approve, or ask for changes.',
     '4. Once approved, derive the waves from plan.md with `omh_status` action `plan`: waves of tasks, each task with the files it owns; a gate per wave.',

@@ -52,6 +52,7 @@ Full setup (herdr integration, senpi permissions, config format, quota): [refere
 | `/ulw <goal>` | Start an ultrawork run: explore → plan waves → dispatch → verify → gate |
 | `/omh check` | Check the config, required agents, and quota mapping |
 | `/omh status` | State of the current run, short (`/omh status full` for every task, worker and pane) |
+| `/omh plan` | Preview `.omh/plan.md` beside the lead; run again to close. With [prismantis](https://github.com/NahumLitvin/prismantis) installed it is a Claude Code pane drawn in color (redrawn on each new draft); otherwise a herdr pane running the first of `leaf --watch`, `glow`, `bat`, `less` installed |
 | `/omh approve` | Approve the lead's plan.md so it can split it into waves |
 | `/omh board` | Toggle the full board pane (every wave, task, worker, quota) |
 | `/omh quota` | Current usage of each subscription |
@@ -70,6 +71,8 @@ The `herdr` skill is copied unmodified from [herdrdev/herdr](https://github.com/
 
 ## What it adds on top of herdr
 
+- **Explore in parallel before planning.** The lead reads the entry points itself and fans the rest out at once: Claude Code `Explore` subagents for quick look-ups, and read-only herdr *scouts* (`omh_dispatch` with a `scout-<name>` task id) on cheaper routed models for long reads and external docs. Scouts need no plan; the lead is woken when they are all back.
+- **Pane workers and subagent workers, side by side.** A profile with `"agent": "subagent"` runs its task as a Claude Code subagent of the lead (no pane, no startup wait) instead of in a herdr pane. Routing, the board (◆), diagnosis and wake-ups treat both alike; the subagent's final reply is saved as its result.md. The default config sends `explore` to an `Explore` subagent, `quick` to a haiku subagent, and keeps long implementation and other providers in panes.
 - **Plan first, waves second.** The lead first writes the plan in prose (`.omh/plan.md`: goal, findings, approach, tasks with acceptance checks, risks) and stops. Only after you approve it with `/omh approve` can it split the plan into waves and dispatch; every replan needs a new approval.
 - **Visible progress.** The hint line under the prompt (or a row above it) shows the run's progress as a small bar and `x/y` tasks done, `⚠n` when a task needs you; `.omh/status.json` and `statusline/omh-wave` hand the same to a custom status line. `/omh board` opens the full board.
 - **The lead knows why a worker stopped.** The mod watches every worker through herdr's event stream. When one is stuck, never started, went idle without a result, or its pane vanished, it reads the screen, the result file and quota, classifies it as `quota-exhausted`, `permission-prompt`, `config-error`, `crashed`, `interrupted` or `unknown`, and wakes the lead with a suggestion.
@@ -136,7 +139,7 @@ The first config file found wins:
 | `notifyHuman` | on | Also send you a herdr notification |
 | `autoContinue` | off | When the run isn't finished and no worker is busy, prompt the lead to keep going |
 | `autoContinueMax` | 3 | Max auto-continues in a row (any prompt you type resets it) |
-| `verbose` | off | Show omh_* tool calls and results in full; off shows one line each (ctrl+o expands) |
+| `verbose` | off | Show omh_* tool calls and results in full; off shows one line each (ctrl+o expands). Shown in full with prismantis installed, a worker's report (`omh_collect`) and results with tables are drawn as markdown |
 
 ## Troubleshooting
 

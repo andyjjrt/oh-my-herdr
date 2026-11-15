@@ -11,11 +11,12 @@ import { type Config, loadConfig } from './config'
 import { diagnose, excerpt } from './diagnose'
 import { appendLine, currentRunId, hasText, listWorkers, Paths, readGates, readJson, remove, type Closing, type DispatchFile, writeJson } from './files'
 import { agentStatus, notify, readScreen } from './herdr'
-import { type Plan, parsePlan, runView, statusFile, type TaskFacts } from './plan'
+import { type Plan, parsePlan, runView, SCOUT_RUN, statusFile, type TaskFacts } from './plan'
 import { PROVIDERS, probe, providerOf, quotaAllows, type Provider } from './quota'
 import { ACTIVE, newWorker, type SettleEffect, type SettleEvent, step } from './settle'
+import { endStatusOf, isSubagentPane, isSubagentWorker, settleStatusOf, subagentIdOf, subagentScreen } from './subagent'
 import { type Display, displayOf } from './statusbar'
-import { alertText, settleText } from './text'
+import { alertText, type ScoutRow, scoutsText, settleText } from './text'
 
 export type Options = {
   /** Where the run's progress shows: the mod's status line, a row above the prompt, or neither. */
@@ -57,6 +58,12 @@ export const rt = {
   queues: new Map<string, Promise<void>>(),
   wakeTimer: null as Timer | null,
   stallRechecked: new Set<string>(),
+  /** The scout state the lead was last woken with (a reload may repeat one wake-up at worst). */
+  scoutKey: '',
+  /** How each subagent worker's run ended (turn.complete), by agent id; read by diagnosis. */
+  subagentEnds: new Map<string, { reason: string; answer: string }>(),
+  /** Polls $.agent.list() while a subagent worker is out. */
+  pollTimer: null as Timer | null,
 }
 
 export function host(): Engine {
@@ -150,7 +157,7 @@ async function perform(w: OmhWorker, effect: SettleEffect): Promise<void> {
     case 'settled':
       rt.stallRechecked.delete(w.name)
       await setOutcome(w, 'finished', null)
-      await maybeWaveSettled()
+      await (w.run === SCOUT_RUN ? maybeScoutsSettled() : maybeWaveSettled())
       return
     case 'alert':
       await onAlert(w, effect.phase)
@@ -171,7 +178,7 @@ async function setOutcome(w: OmhWorker, outcome: string | null, diag: string | n
 export async function diagnoseWorker(w: OmhWorker): Promise<OmhDiagnosis> {
   const $ = host()
   const cfg = rt.cfg
-  const screen = w.phase === 'gone' ? '' : await readScreen($, w.pane, 80).catch(() => '')
+  const screen = isSubagentWorker(w) ? await subagentScreenOf(w) : w.phase === 'gone' ? '' : await readScreen($, w.pane, 80).catch(() => '')
   const hasResult = w.task !== null && w.run !== null ? await hasText($, paths().result(w.run, w.task)) : false
   let quotaExhausted: string | null = null
   const profile = cfg?.profiles[w.profile]
@@ -228,10 +235,35 @@ async function raise(w: OmhWorker, phase: string, diag: OmhDiagnosis): Promise<v
   if (rt.options.notifyHuman) {
     await notify($, `omh: ${w.name} ${phase}`, `${w.task ?? ''} ${diag.verdict}: ${diag.evidence}`.trim().slice(0, 200), 'request')
   }
-  const screen = diag.verdict === 'unknown' ? diag.evidence : excerpt(await readScreen($, w.pane, 40).catch(() => ''), 10)
+  const screen =
+    diag.verdict === 'unknown' ? diag.evidence : isSubagentWorker(w) ? excerpt(await subagentScreenOf(w), 10) : excerpt(await readScreen($, w.pane, 40).catch(() => ''), 10)
   await queueWake(alertText(w, phase, diag, screen))
-  // An alert can be the last thing the wave was waiting on.
-  await maybeWaveSettled()
+  // An alert can be the last thing the wave (or the scouts) was waiting on.
+  await (w.run === SCOUT_RUN ? maybeScoutsSettled() : maybeWaveSettled())
+}
+
+/** Scouts have no wave: wake the lead once none is still busy, listing every scout not yet collected. */
+async function maybeScoutsSettled(): Promise<void> {
+  const $ = host()
+  const p = paths()
+  const out = Object.values(await workers()).filter(w => w.run === SCOUT_RUN && w.task !== null)
+  if (out.length === 0) return
+  if (out.some(w => ACTIVE.has(w.phase) && w.phase !== 'stalled')) return // like a wave: a blocked scout may still finish
+  const rows: ScoutRow[] = []
+  for (const w of out) {
+    const reported = await hasText($, p.result(SCOUT_RUN, w.task!))
+    rows.push({
+      id: w.task!,
+      worker: `${w.name} (${w.profile})`,
+      state: reported ? 'reported' : w.phase,
+      detail: reported ? 'result.md written' : w.diagnosis ? `${w.diagnosis.verdict}: ${w.diagnosis.evidence}` : '',
+    })
+  }
+  const key = rows.map(r => `${r.id}=${r.state}`).sort().join(',')
+  if (rt.scoutKey === key) return
+  rt.scoutKey = key
+  if (rt.options.notifyHuman) await notify($, 'omh: scouts back', `${rows.filter(r => r.state === 'reported').length}/${rows.length} reported`, 'done')
+  await queueWake(scoutsText(rows))
 }
 
 // ------------------------------------------------------------------ the wave and waking
@@ -404,6 +436,63 @@ export function startWatcher(name: string, pane: string): void {
   })()
 }
 
+// ------------------------------------------------------------------ subagent workers
+
+async function listedStatus(agentId: string): Promise<string | undefined> {
+  const list = await host().agent.list().catch(() => null)
+  return list?.find(a => a.id === agentId)?.status
+}
+
+async function subagentScreenOf(w: OmhWorker): Promise<string> {
+  const id = subagentIdOf(w)
+  return id === null ? '' : subagentScreen(rt.subagentEnds.get(id), await listedStatus(id))
+}
+
+/**
+ * A subagent's run ended (turn.complete with its agentId). Its answer is the report: saved as
+ * result.md unless it starts with BLOCKED or the subagent wrote the file itself.
+ */
+export async function onSubagentEnd(agentId: string, reason: string, answer: string): Promise<void> {
+  const $ = host()
+  // Kept even for a subagent not (yet) recorded: dispatch applies an end that beat it.
+  rt.subagentEnds.set(agentId, { reason, answer })
+  const w = Object.values(await workers()).find(x => subagentIdOf(x) === agentId)
+  if (!w) return
+  let status = endStatusOf(reason)
+  if (w.run !== null && w.task !== null && ACTIVE.has(w.phase)) {
+    const file = paths().result(w.run, w.task)
+    const blocked = /^\s*BLOCKED\b/.test(answer)
+    if (blocked) status = 'gone'
+    else if (status === 'done' && answer.trim() !== '' && !(await hasText($, file))) await $.fs.write(file, `${answer.trim()}\n`)
+  }
+  await feed(w.name, { kind: 'status', status, at: await $.clock.now() })
+}
+
+/** Keep polling $.agent.list() while any subagent worker has a task out: it says when one waits or dies. */
+export function armSubagentPoll(): void {
+  if (rt.pollTimer !== null) return
+  rt.pollTimer = host().clock.after(10_000, () => {
+    rt.pollTimer = null
+    void pollSubagents().catch(err => log(`subagent poll failed: ${(err as Error).message}`))
+  })
+}
+
+async function pollSubagents(): Promise<void> {
+  const $ = host()
+  const out = Object.values(await workers()).filter(w => isSubagentWorker(w) && ACTIVE.has(w.phase))
+  if (out.length === 0) return
+  const list = await $.agent.list()
+  const now = await $.clock.now()
+  for (const w of out) {
+    const id = subagentIdOf(w)!
+    // Its end comes by turn.complete; until then only waiting, running and a death are news.
+    if (rt.subagentEnds.has(id)) continue
+    const status = settleStatusOf(list.find(a => a.id === id)?.status)
+    if (status !== 'done') await feed(w.name, { kind: 'status', status, at: now })
+  }
+  armSubagentPoll()
+}
+
 export function stopWatcher(name: string): void {
   const w = rt.watchers.get(name)
   if (w) w.stopped = true
@@ -480,15 +569,19 @@ export async function reconcile(): Promise<void> {
   const files = await listWorkers($, p)
   const known = await workers()
   const now = await $.clock.now()
+  const listed = files.some(f => isSubagentPane(f.pane)) ? await $.agent.list().catch(() => []) : []
   for (const f of files) {
-    const status = await agentStatus($, f.pane).catch(() => 'unknown')
+    const sub = isSubagentPane(f.pane)
+    // A subagent missing from the list ended before the reload: its end (and answer) is lost unless result.md was written.
+    const status = sub ? settleStatusOf(listed.find(a => `agent:${a.id}` === f.pane)?.status) : await agentStatus($, f.pane).catch(() => 'unknown')
     let w = known[f.name]
     if (!w || w.pane !== f.pane) {
       w = newWorker({ name: f.name, pane: f.pane, profile: f.profile, family: f.family, agent: f.agent })
       if (f.run && f.task) {
         const d = await readJson<DispatchFile>($, p.dispatch(f.run, f.task))
         const done = await hasText($, p.result(f.run, f.task))
-        const closed = (await $.fs.exists(p.verified(f.run, f.task))) || (await $.fs.exists(p.abandoned(f.run, f.task)))
+        const closed =
+          (await $.fs.exists(p.verified(f.run, f.task))) || (await $.fs.exists(p.abandoned(f.run, f.task))) || (await $.fs.exists(p.collected(f.run, f.task)))
         if (!closed) {
           // Unknown history: if it was dispatched long enough ago, assume it started.
           const long = d !== null && now - d.dispatchedAt > stallMsOf(rt.cfg, f.agent)
@@ -506,6 +599,12 @@ export async function reconcile(): Promise<void> {
     await setWorker(w)
     if (status === 'gone') {
       await feed(f.name, { kind: 'status', status: 'gone', at: now })
+    } else if (sub) {
+      if (ACTIVE.has(w.phase)) {
+        // Its turn.complete (and the answer with it) came before the reload: only result.md can tell.
+        await feed(f.name, { kind: 'status', status: status === 'done' ? 'gone' : status, at: now })
+        armSubagentPoll()
+      }
     } else {
       startWatcher(f.name, f.pane)
       if (ACTIVE.has(w.phase)) await feed(f.name, { kind: 'tick', at: now })

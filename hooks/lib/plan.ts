@@ -26,6 +26,14 @@ export type Plan = { goal: string; waves: PlanWave[] }
 
 export const TASK_ID = /^[A-Za-z0-9._-]{1,64}$/
 
+// Scouts: read-only explore/research tasks the lead sends out while planning, before any plan.json
+// exists. They live outside every run (under SCOUT_RUN), have no wave or gate, own no files, and
+// are closed by omh_collect. The `scout-` prefix is theirs; plan tasks may not use it.
+export const SCOUT_RUN = '_scout'
+export const SCOUT_ID = /^scout-[A-Za-z0-9._-]{1,58}$/
+export const SCOUT_INTENTS: readonly Intent[] = ['explore', 'research']
+export const isScout = (id: string): boolean => /^scout-/i.test(id)
+
 type Json = Record<string, unknown>
 const rec = (v: unknown): Json => (v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Json) : {})
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
@@ -55,6 +63,7 @@ export function parsePlan(raw: unknown, categories: readonly string[]): { plan: 
         errors.push(`wave ${id}: task id '${tid}' must match ${TASK_ID.source}`)
         continue
       }
+      if (isScout(tid)) errors.push(`task id '${tid}': the scout- prefix is reserved for scouts (omh_dispatch before a plan); pick another id`)
       if (seen.has(tid)) errors.push(`task id '${tid}' is used twice`)
       const intent = t.intent as Intent
       if (!INTENTS.includes(intent)) errors.push(`task ${tid}: "intent" must be one of ${INTENTS.join(', ')}`)

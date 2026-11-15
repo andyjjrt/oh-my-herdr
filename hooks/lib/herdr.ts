@@ -75,13 +75,39 @@ export async function splitPane($: Engine, anchor: string, direction: 'right' | 
   return id
 }
 
-export async function createTab($: Engine, label: string, cwd: string): Promise<{ tab: string; pane: string }> {
-  const r = await herdr($, ['tab', 'create', '--label', label, '--cwd', cwd, '--env', 'OMH_ROLE=worker', '--no-focus'])
+/** A new tab in `workspace` (herdr appends it after the workspace's other tabs). */
+export async function createTab($: Engine, label: string, cwd: string, workspace: string | null = null): Promise<{ tab: string; pane: string }> {
+  const r = await herdr($, ['tab', 'create', ...(workspace ? ['--workspace', workspace] : []), '--label', label, '--cwd', cwd, '--env', 'OMH_ROLE=worker', '--no-focus'])
   const res = rec(r.result)
   const tab = rec(res.tab).tab_id ?? rec(res.tab).id
   const pane = rec(res.root_pane).pane_id
   if (typeof tab !== 'string' || typeof pane !== 'string') throw new HerdrError('tab create returned no ids', null, JSON.stringify(r))
   return { tab, pane }
+}
+
+/** A pane's workspace and tab, or null when it is gone. */
+export async function paneHome($: Engine, pane: string): Promise<{ workspace: string; tab: string } | null> {
+  try {
+    const p = rec(rec((await herdr($, ['pane', 'get', pane])).result).pane)
+    return typeof p.workspace_id === 'string' && typeof p.tab_id === 'string' ? { workspace: p.workspace_id, tab: p.tab_id } : null
+  } catch (err) {
+    if (err instanceof HerdrError) return null
+    throw err
+  }
+}
+
+/** The panes of a tab in herdr's order, or null when the tab is gone. */
+export async function tabPanes($: Engine, tab: string): Promise<string[] | null> {
+  let workspace: string
+  try {
+    const t = rec(rec((await herdr($, ['tab', 'get', tab])).result).tab)
+    workspace = typeof t.workspace_id === 'string' ? t.workspace_id : tab.split(':')[0]!
+  } catch (err) {
+    if (err instanceof HerdrError) return null
+    throw err
+  }
+  const list = rec((await herdr($, ['pane', 'list', '--workspace', workspace])).result).panes
+  return (Array.isArray(list) ? list : []).map(rec).filter(p => p.tab_id === tab && typeof p.pane_id === 'string').map(p => p.pane_id as string)
 }
 
 export async function closePane($: Engine, pane: string): Promise<void> {

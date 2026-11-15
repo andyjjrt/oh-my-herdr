@@ -39,7 +39,7 @@ For a reviewer brief, include the base ref to diff against (e.g. `git diff main.
 
 ## How many workers
 
-- Explore phase: 1–2 `explore`, 0–1 `librarian`.
+- Explore phase (before plan.md): 2–4 helpers in parallel, each on a different area — `Explore` subagents for quick look-ups, `scout-*` dispatches (`explore`, 0–1 `librarian`) for long reads. A scout brief is the same template; it gets a read-only "Files you own: none" section instead of the plan's files.
 - Implementation wave: one worker per independent file-ownership group, within `max_concurrent`.
 - Each gate: one `reviewer`.
 

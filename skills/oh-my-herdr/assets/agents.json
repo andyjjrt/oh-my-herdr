@@ -4,8 +4,11 @@
     "Override or add entries under \"agents\" in config.json (same shape).",
     "launch = \"herdr-kind\": `herdr agent start <name> --kind <kind> --pane <pane> -- <args>` (herdr runs its canonical binary).",
     "launch = \"command\":    runs <command> <args> in the pane with HERDR_AGENT=<detect_as>, waits until herdr detects the agent, then names it.",
-    "                         Use this for forks/wrappers whose executable herdr doesn't know (e.g. senpi, a pi fork)."
+    "                         Use this for forks/wrappers whose executable herdr doesn't know (e.g. senpi, a pi fork).",
+    "launch = \"subagent\":   no pane: a Claude Code subagent of the lead ($.agent.spawn). The profile's \"model\" and",
+    "                         \"subagent_type\" pick it; its final reply is saved as result.md. Shares the lead's Claude quota."
   ],
   "claude":   { "launch": "herdr-kind", "kind": "claude",   "bin": "claude" },
-  "senpi":    { "launch": "command",    "command": ["senpi"], "detect_as": "pi", "bin": "senpi" }
+  "senpi":    { "launch": "command",    "command": ["senpi"], "detect_as": "pi", "bin": "senpi" },
+  "subagent": { "launch": "subagent" }
 }

@@ -45,6 +45,7 @@ export type Engine = {
   clock: { now: E['clock']['now']; after: E['clock']['after']; every: E['clock']['every'] }
   http: { fetch: E['http']['fetch'] }
   prompt: { submit: (args: { text: string; asUser?: true }) => Promise<unknown> }
+  agent: { spawn: E['agent']['spawn']; list: E['agent']['list'] }
   ui: { log: (text: string) => void; status: E['ui']['status'] }
   session: { append: E['session']['append'] }
   state: {
@@ -101,6 +102,7 @@ export function bind($: EngineInterface, env: Partial<Record<EnvName, string>>):
     },
     http: { fetch: (url, init) => $.http.fetch(url, init) },
     prompt: { submit: args => $.prompt.submit(args) },
+    agent: { spawn: args => $.agent.spawn(args), list: () => $.agent.list() },
     ui: {
       log: text => $.ui.log(text, { to: 'debug' }),
       status: text => $.ui.status(text),

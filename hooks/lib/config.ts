@@ -4,13 +4,18 @@
 
 import type { Engine } from './engine'
 
-export type Profile = { agent: string; family: string; args: string[]; quota?: string | null }
+/**
+ * A named agent + model. For an agent whose launch is `subagent`, `model` (an alias or id) and
+ * `subagentType` (`general-purpose`, `Explore`, a plugin's agent) say what Claude Code starts; `args`
+ * is unused there.
+ */
+export type Profile = { agent: string; family: string; args: string[]; quota?: string | null; model?: string; subagentType?: string }
 
 export type DiagnoseRules = Partial<Record<string, string[]>>
 
 export type AgentSpec = {
   name: string
-  launch: 'herdr-kind' | 'command'
+  launch: 'herdr-kind' | 'command' | 'subagent'
   kind?: string
   command?: string[]
   detect_as?: string
@@ -35,6 +40,8 @@ export type Config = {
   dir: string
   lead: string | null
   maxConcurrent: number
+  /** Panes in one omh-workers tab before the next tab opens. */
+  maxPanesPerTab: number
   quota: QuotaConfig
   profiles: Record<string, Profile>
   categories: Record<string, Category>
@@ -54,7 +61,7 @@ export function normalizeCategory(raw: unknown): Category {
 
 export function normalizeAgent(name: string, raw: unknown): AgentSpec {
   const r = asRecord(raw)
-  const launch = r.launch === 'command' ? 'command' : 'herdr-kind'
+  const launch = r.launch === 'command' ? 'command' : r.launch === 'subagent' ? 'subagent' : 'herdr-kind'
   const command = asStrings(r.command)
   const kind = typeof r.kind === 'string' ? r.kind : undefined
   return {
@@ -82,6 +89,8 @@ export function normalizeConfig(file: string, raw: unknown, builtinAgents: unkno
       family: typeof pr.family === 'string' ? pr.family : 'unknown',
       args: asStrings(pr.args),
       ...('quota' in pr && { quota: typeof pr.quota === 'string' ? pr.quota : null }),
+      ...(typeof pr.model === 'string' && { model: pr.model }),
+      ...(typeof pr.subagent_type === 'string' && { subagentType: pr.subagent_type }),
     }
   }
   const categories: Record<string, Category> = {}
@@ -91,11 +100,14 @@ export function normalizeConfig(file: string, raw: unknown, builtinAgents: unkno
   for (const [name, a] of Object.entries(asRecord(r.agents))) {
     agents[name] = normalizeAgent(name, { ...asRecord(builtinAgents)[name] as Json, ...asRecord(a) })
   }
+  // A subagent profile always names its type, so `subagentType` alone marks one (providerOf reads it).
+  for (const p of Object.values(profiles)) if (agents[p.agent]?.launch === 'subagent' && p.subagentType === undefined) p.subagentType = 'general-purpose'
   return {
     file,
     dir: file.slice(0, file.lastIndexOf('/')),
     lead: typeof r.lead === 'string' ? r.lead : null,
     maxConcurrent: typeof r.max_concurrent === 'number' ? r.max_concurrent : 0,
+    maxPanesPerTab: typeof r.max_panes_per_tab === 'number' && r.max_panes_per_tab >= 1 ? Math.floor(r.max_panes_per_tab) : 4,
     quota: {
       enabled: q.enabled !== false,
       threshold: typeof q.threshold === 'number' ? q.threshold : 95,
@@ -107,6 +119,12 @@ export function normalizeConfig(file: string, raw: unknown, builtinAgents: unkno
     categories,
     agents,
   }
+}
+
+/** Whether a profile runs as a Claude Code subagent of the lead rather than in a herdr pane. */
+export function isSubagentProfile(cfg: Config, profile: string): boolean {
+  const p = cfg.profiles[profile]
+  return p !== undefined && cfg.agents[p.agent]?.launch === 'subagent'
 }
 
 /** Problems that make a config unusable or a category misroute; empty when fine. */

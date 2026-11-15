@@ -31,7 +31,16 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
 
 ## 2. The ultrawork loop
 
-1. **Explore.** Read the entry points yourself; for a large area, dispatch `explore` tasks (and a `librarian` if external docs matter) asking for file:line evidence. These can be wave 1 of the plan.
+1. **Explore — in parallel, before the plan.** Read the entry points yourself and fan the rest out; don't read a large area alone. A `ulw` / `ultrawork` request *is* the user explicitly asking for helpers, so the usual "don't spawn agents unless asked" restraint does not apply here. Two kinds, mix them freely:
+
+   | | Claude Code subagents | herdr scouts |
+   | --- | --- | --- |
+   | How | Agent tool, `subagent_type: "Explore"` (or `"Plan"` for a design question). Launch them **in one message** so they run at once, each owning a different area | `omh_dispatch` with task id `scout-<name>` and intent `explore` (or `research` → `librarian`). No plan needed |
+   | Runs on | this session's model, inside your turn | a routed model: in a worker pane, or as a subagent the mod starts and tracks (`sub-*` profiles) |
+   | Best for | quick look-ups: where is X, how does Y flow | long reads, a whole subsystem, external docs |
+   | Then | results come back in the same turn | **end your turn**; you are woken once every scout is back, then `omh_collect` each (that closes it and frees the worker; `omh_status` `abandon` closes one that brought nothing) |
+
+   Ask every helper for file:line evidence, and spot-check what you build the plan on. Scouts are read-only and own no files; anything that changes files waits for the approved plan. Exploring that needs the plan's own waves (e.g. a big audit whose result *is* the deliverable) can still be wave 1 of the plan.
 2. **Intent Gate.** For each task decide its *intent* and *category*:
 
    | intent | meaning | usual category |
@@ -45,7 +54,7 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
    | write | docs and prose | writing |
 
    An unusual pair is allowed; your `rationale` says why.
-3. **Draft plan.md, then stop.** `omh_status` with `action: "draft"` and `markdown`: the plan in prose — goal, what exploring found (file:line), approach, each task with its acceptance check, risks, open questions. It is saved as `.omh/plan.md`. Give the user a short summary and the path, then **end your turn**. The user reads (or edits) it and approves with `/omh approve`, which wakes you with a prompt to derive the waves; if they ask for changes, draft again. Until then `action: "plan"` is refused.
+3. **Draft plan.md, then stop.** `omh_status` with `action: "draft"` and `markdown`: the plan in prose — goal, what exploring found (file:line), approach, each task with its acceptance check, risks, open questions. It is saved as `.omh/plan.md`. Give the user a short summary and the path, mention that `/omh plan` previews it in a pane beside you, then **end your turn**. The user reads (or edits) it and approves with `/omh approve`, which wakes you with a prompt to derive the waves; if they ask for changes, draft again. Until then `action: "plan"` is refused.
 4. **Derive the waves.** Once plan.md is approved, `omh_status` with `action: "plan"` and the plan.json that splits it into waves:
 
    ```json
@@ -75,6 +84,7 @@ The status line (or a row above the prompt) shows the run's progress (`██░
 ## 4. Routing and quota
 
 - **profiles** — a named agent + model: `agent` (`claude`, `senpi`, … from `assets/agents.json` or the config's `agents`), `args` passed to that agent's CLI, and `family` (for review independence).
+- **subagent profiles** (`agent: "subagent"`) — the worker is a Claude Code subagent of yours, started by `omh_dispatch` and tracked like a pane worker (board, wake-ups, diagnosis), marked ◆. Its final reply becomes its result.md. You dispatch it the same way and are woken the same way; its own "task finished" notification is held back. It shares your Claude quota and permissions, runs one task (never pass it as `worker`), and `omh_teardown` only forgets one still running.
 - **categories** — an ordered list of profiles; the first whose provider has quota wins, preferring one outside any avoided family.
 - **quota** — Claude and OpenCode Go usage is read from their APIs before routing. A provider at or over the threshold is skipped; when every candidate is out, dispatch fails with `no-profile` — do the task yourself if it's small, or tell the user which providers are out and when they reset.
 
@@ -90,6 +100,7 @@ Every brief tells the worker to write `.omh/runs/<run>/<task>/result.md` and rep
 - **`config-error`** — wrong model id, missing login or API key. Re-dispatching fails the same way; tell the user.
 - **`quota-exhausted`** — re-dispatch without `worker`/`profile`; routing skips the exhausted provider.
 - **Two workers edited the same file** — the plan's `owns` was wrong. Tear down, re-plan with proper ownership.
+- **A subagent worker is `blocked`** — it is waiting on a permission prompt in *this* session. Ask the user before approving anything that changes files or grants access.
 - **The worker went off-script** — check its brief (`.omh/runs/<run>/<task>/brief.md`); the fix is almost always a clearer brief, not a stronger model.
 
 Raw herdr commands, for when you need to look at a pane yourself: `references/herdr-cheatsheet.md`. For anything beyond it (pane layout, waits, read sources, safety rules), load the bundled `herdr` skill — herdr's own guide, shipped with this plugin.

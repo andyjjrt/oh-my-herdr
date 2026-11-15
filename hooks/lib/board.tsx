@@ -1,5 +1,6 @@
 // The /omh board pane. The run's progress also shows under or above the prompt (hooks/lib/statusbar.tsx) and in .omh/status.json.
 
+import { isSubagentWorker } from './subagent'
 import type { OmhQuota, OmhRunView, OmhTaskStatus, OmhWorker } from '../../types'
 
 export const BOARD_ID = 'omh-board'
@@ -58,7 +59,7 @@ export function boardView(el: Elements, run: OmhRunView | null, workers: Record<
     for (const w of ws) {
       lines.push(
         <Text color={w.phase === 'blocked' || w.phase === 'stalled' ? 'yellow' : w.phase === 'gone' || w.phase === 'idle-no-result' ? 'red' : undefined}>
-          {'  '}
+          {isSubagentWorker(w) ? '◆ ' : '  '}
           {w.name} {w.phase} {w.profile}
           {w.task ? ` · ${w.task}` : ''}
           {w.diagnosis ? ` · ${w.diagnosis.verdict}` : ''}

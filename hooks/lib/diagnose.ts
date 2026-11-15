@@ -32,12 +32,20 @@ export const DEFAULT_RULES: Record<string, DiagnoseRules> = {
     crashed: ['Error: .*\\n\\s+at ', 'panicked at', 'command not found', 'Traceback \\(most recent call last\\)'],
     interrupted: ['Operation aborted', 'Interrupted', '\\^C'],
   },
+  // A subagent has no screen: subagentScreen() (subagent.ts) writes its status, end reason and answer.
+  subagent: {
+    'quota-exhausted': ['usage limit', 'rate limit', 'limit will reset', 'out of extra usage', "You've hit your"],
+    'permission-prompt': ['^subagent status: waiting'],
+    'config-error': ['Invalid model', 'model .* not (found|available)', 'not authenticated'],
+    crashed: ['^subagent ended: (error|refused)', '^subagent status: failed'],
+    interrupted: ['^subagent ended: aborted', '^subagent status: killed'],
+  },
 }
 
 const HINTS: Record<OmhVerdict, string> = {
   'finished-late': 'The result arrived after the grace period; collect and verify it as usual.',
   'quota-exhausted': 'Its subscription is out of quota: dispatch the task again without naming a worker so routing skips that provider, or wait for the reset.',
-  'permission-prompt': 'It is waiting on a dialog. Read it (`herdr agent read <name>`) and ask the user before answering anything that changes files or permissions.',
+  'permission-prompt': 'It is waiting on a dialog. Read it (`herdr agent read <name>`; a subagent asks in this session) and ask the user before answering anything that changes files or permissions.',
   'config-error': 'The agent or model is misconfigured (login, model id, API key). Tell the user what to fix; re-dispatching will fail the same way.',
   crashed: 'The agent crashed. Read the pane, then spawn a fresh worker for the task.',
   interrupted: 'The agent was interrupted (by the user or a keypress). Ask before re-dispatching.',
@@ -92,6 +100,7 @@ export function diagnose(input: DiagnoseInput): OmhDiagnosis {
     }
   }
   if (input.quotaExhausted !== null) return done('quota-exhausted', input.quotaExhausted)
-  if (input.phase === 'gone') return done('crashed', 'the pane closed or the agent exited before writing result.md')
+  // A subagent's "screen" is its status and answer (a BLOCKED reason, say): show it rather than guess.
+  if (input.phase === 'gone' && input.agent !== 'subagent') return done('crashed', 'the pane closed or the agent exited before writing result.md')
   return done('unknown', excerpt(input.screen, 8).slice(-600))
 }

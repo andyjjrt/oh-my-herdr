@@ -6,6 +6,7 @@
 //   .omh/status.json                   the current run's progress, for a custom status line (statusline/)
 //   .omh/plan.md                       the plan in prose the lead drafts and the user approves
 //   .omh/plan.approved                 digest of the plan.md the user approved (/omh approve)
+//   .omh/plan-view.json                { pane } of the herdr pane /omh plan opened to preview plan.md
 //   .omh/runs/<run>/plan.md            the approved plan.md the run's plan.json was derived from
 //   .omh/runs/<run>/plan.json          the plan (hooks/lib/plan.ts)
 //   .omh/runs/<run>/gates.json         { "passed": [1, 2] }
@@ -13,6 +14,8 @@
 //   .omh/runs/<run>/<task>/result.md   what the worker reported
 //   .omh/runs/<run>/<task>/dispatch.json  intent, category, rationale, profile, times, outcome
 //   .omh/runs/<run>/<task>/verified.json | abandoned.json  { at, quality }
+//   .omh/runs/_scout/<scout>/…         a scout (read-only, before the plan): brief, result, dispatch,
+//                                      and collected.json once omh_collect read it or it was abandoned
 
 import type { Engine } from './engine'
 
@@ -89,6 +92,10 @@ export class Paths {
   get approval() {
     return `${this.omh}/plan.approved`
   }
+  /** The pane /omh plan opened beside the lead to preview plan.md. */
+  get planView() {
+    return `${this.omh}/plan-view.json`
+  }
   gates(run: string) {
     return `${this.run(run)}/gates.json`
   }
@@ -109,6 +116,10 @@ export class Paths {
   }
   abandoned(run: string, task: string) {
     return `${this.task(run, task)}/abandoned.json`
+  }
+  /** A scout's closing marker: { at, quality }. */
+  collected(run: string, task: string) {
+    return `${this.task(run, task)}/collected.json`
   }
 }
 

@@ -3,22 +3,27 @@
 
 
 import type { OmhWorker } from '../../types'
-import { configProblems, type Config } from './config'
+import { configProblems, isSubagentProfile, type Config } from './config'
 import { diagnose, excerpt } from './diagnose'
 import { currentRunId, hasText, listWorkers, readGates, readJson, remove, writeJson, type Closing, type DispatchFile, type WorkerFile } from './files'
-import { agentStatus, closePane, createTab, herdr, HerdrError, paneExists, readScreen, shellQuote, splitPane } from './herdr'
-import { DONE, draftDigest, findTask, isApproved, parsePlan, TASK_ID } from './plan'
+import { agentStatus, closePane, createTab, herdr, HerdrError, paneExists, paneHome, readScreen, shellQuote, splitPane, tabPanes } from './herdr'
+import { place, type TabSlot } from './layout'
+import { DONE, draftDigest, findTask, isApproved, isScout, parsePlan, SCOUT_ID, SCOUT_INTENTS, SCOUT_RUN, TASK_ID } from './plan'
+import { code, table } from './md'
 import { formatQuota, providerOf, quotaAllows } from './quota'
 import { INTENTS, isUsualPair, pickProfile, type Intent } from './route'
-import { isFree, newWorker } from './settle'
+import { ACTIVE, isFree, newWorker } from './settle'
+import { isSubagentPane, isSubagentWorker, subagentPane, subagentReporting } from './subagent'
 import {
   config,
   diagnoseWorker,
+  armSubagentPoll,
   dropWorker,
   feed,
   host,
   historyFile,
   loadPlan,
+  onSubagentEnd,
   paths,
   recordHistory,
   refreshQuota,
@@ -76,11 +81,14 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
   let warnings: string[] = []
   if (args.profile) {
     if (!cfg.profiles[args.profile]) return fail(`unknown profile '${args.profile}' (known: ${Object.keys(cfg.profiles).join(', ')})`)
+    if (isSubagentProfile(cfg, args.profile)) return fail(`profile '${args.profile}' runs as a subagent, which starts with its task: omh_dispatch it instead`)
     const allowed = quotaAllows(cfg, q, args.profile)
     if (allowed !== true) return fail(JSON.stringify({ error: 'quota-exhausted', profile: args.profile, reason: allowed, hint: 'pick another profile, or leave profile out so routing skips exhausted providers' }))
     profile = args.profile
   } else if (args.category) {
-    const r = pickProfile(cfg, args.category, { intent: args.intent ?? null, avoidFamilies: args.avoidFamilies ?? [], quotaOk: pr => quotaAllows(cfg, q, pr) })
+    // A subagent starts with its task (omh_dispatch); a pane worker is all omh_spawn can start ahead of time.
+    const quotaOk = (pr: string) => (isSubagentProfile(cfg, pr) ? 'a subagent profile (starts at dispatch)' : quotaAllows(cfg, q, pr))
+    const r = pickProfile(cfg, args.category, { intent: args.intent ?? null, avoidFamilies: args.avoidFamilies ?? [], quotaOk })
     if (!r.ok) return fail(JSON.stringify({ error: 'no-profile', reason: r.error, skipped: r.skipped }))
     profile = r.profile
     warnings = r.warnings
@@ -96,31 +104,12 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
   const prof = cfg.profiles[profile]!
   const spec = cfg.agents[prof.agent]
   if (!spec) return fail(`profile '${profile}' uses unknown agent '${prof.agent}'`)
+  if (spec.launch === 'subagent') return fail(`profile '${profile}' runs as a subagent, which starts with its task: omh_dispatch it instead`)
   const cwd = args.cwd ?? p.root
 
-  // A pane in the omh-workers tab: split beside a live worker, else the tab's root, else a new tab.
-  let pane: string | null = null
-  const tab = await readJson<{ tab: string; root_pane: string; used?: boolean }>($, p.tab)
+  let pane: string
   try {
-    if (tab) {
-      const files = await listWorkers($, p)
-      let anchor: string | null = null
-      for (const f of files) if (await paneExists($, f.pane)) anchor = f.pane
-      if (anchor === null && (await paneExists($, tab.root_pane))) {
-        if (!tab.used) {
-          pane = tab.root_pane
-          await writeJson($, p.tab, { ...tab, used: true })
-        } else anchor = tab.root_pane
-      }
-      if (pane === null && anchor !== null) {
-        pane = await splitPane($, anchor, files.length % 2 === 0 ? 'right' : 'down', cwd)
-      }
-    }
-    if (pane === null) {
-      const t = await createTab($, 'omh-workers', cwd)
-      await writeJson($, p.tab, { tab: t.tab, root_pane: t.pane, used: true })
-      pane = t.pane
-    }
+    pane = await workerPane(cfg.maxPanesPerTab, cwd)
   } catch (err) {
     return fail(`could not get a pane: ${(err as Error).message}`)
   }
@@ -168,6 +157,43 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
     )
   }
   return { worker, warnings }
+}
+
+type TabRecord = { tab: string; root_pane: string; used?: boolean }
+
+/**
+ * A pane for a new worker: in an omh-workers tab of the lead's workspace with room (fewer than
+ * `maxPanes` panes), else in a new tab there. `.omh/tab.json` keeps the tabs, oldest first.
+ */
+async function workerPane(maxPanes: number, cwd: string): Promise<string> {
+  const $ = host()
+  const p = paths()
+  const raw = await readJson<TabRecord | { tabs: TabRecord[] }>($, p.tab)
+  const records: TabRecord[] = raw === null ? [] : 'tabs' in raw ? raw.tabs : [raw] // the single-tab file of 0.2
+  const slots: TabSlot[] = []
+  const live: TabRecord[] = []
+  for (const r of records) {
+    const panes = await tabPanes($, r.tab)
+    if (panes === null) continue
+    live.push(r)
+    const freeRoot = !r.used && panes.includes(r.root_pane) ? r.root_pane : null
+    slots.push({ tab: r.tab, freeRoot, count: panes.length, lastPane: panes[panes.length - 1] ?? null })
+  }
+  const at = place(slots, maxPanes)
+  let pane: string
+  if (at.kind === 'root') {
+    pane = at.pane
+    for (const r of live) if (r.tab === at.tab) r.used = true
+  } else if (at.kind === 'split') {
+    pane = await splitPane($, at.anchor, at.direction, cwd)
+  } else {
+    const home = rt.selfPane === null ? null : await paneHome($, rt.selfPane)
+    const t = await createTab($, at.label, cwd, home?.workspace ?? null)
+    live.push({ tab: t.tab, root_pane: t.pane, used: true })
+    pane = t.pane
+  }
+  await writeJson($, p.tab, { tabs: live })
+  return pane
 }
 
 async function startAgent(
@@ -249,25 +275,45 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
   if (!a.rationale?.trim()) return fail('rationale is required: one line on why this intent and category fit the task')
   if (!a.brief?.trim()) return fail('brief is required: what the worker must do, the files it owns, and how to check its work')
 
-  const run = await currentRunId($, p)
-  if (run === null) return fail('no plan yet: write one with omh_status action "plan" before dispatching')
-  const plan = await loadPlan(run)
-  const found = plan ? findTask(plan, a.task) : null
-  if (!plan || !found) return fail(`task '${a.task}' is not in the plan of run ${run}; add it with omh_status action "plan" first`)
-  const { task, wave } = found
+  // What is being sent: a task of the approved plan, or a scout (read-only, before or beside the plan).
+  const scout = isScout(a.task)
+  let run: string
+  let task: { id: string; title: string; category: string; owns: string[] }
+  let workerBase: string
+  if (scout) {
+    if (!SCOUT_ID.test(a.task)) return fail(`bad scout id '${a.task}' (must match ${SCOUT_ID.source})`)
+    if (!SCOUT_INTENTS.includes(intent)) return fail(`a scout is read-only: its intent must be ${SCOUT_INTENTS.join(' or ')}; anything that changes files belongs in the approved plan`)
+    run = SCOUT_RUN
+    const fallback = intent === 'research' && cfg.categories.librarian ? 'librarian' : 'explore'
+    task = { id: a.task, title: a.task, category: a.category ?? fallback, owns: [] }
+    workerBase = a.task
+    await remove($, p.collected(run, task.id))
+  } else {
+    const current = await currentRunId($, p)
+    if (current === null) {
+      return fail(`no plan yet, so '${a.task}' cannot be dispatched. To explore before planning, dispatch a scout instead (task id 'scout-<name>', intent explore or research), or use Explore subagents; then draft plan.md with omh_status action "draft".`)
+    }
+    run = current
+    const plan = await loadPlan(run)
+    const found = plan ? findTask(plan, a.task) : null
+    if (!plan || !found) return fail(`task '${a.task}' is not in the plan of run ${run}; add it with omh_status action "plan" first (or, to look something up, dispatch a 'scout-<name>' task)`)
+    const { wave } = found
+    task = found.task
 
-  // Gate: a later wave waits until every earlier gate has passed.
-  const gates = await readGates($, p, run)
-  const openGate = plan.waves.find(w => w.id < wave.id && !gates.has(w.id))
-  if (openGate) {
-    return fail(`wave ${wave.id} cannot start: the gate of wave ${openGate.id} (“${openGate.gate}”) has not been marked passed. Verify that wave and use omh_status action "gate".`)
+    // Gate: a later wave waits until every earlier gate has passed.
+    const gates = await readGates($, p, run)
+    const openGate = plan.waves.find(w => w.id < wave.id && !gates.has(w.id))
+    if (openGate) {
+      return fail(`wave ${wave.id} cannot start: the gate of wave ${openGate.id} (“${openGate.gate}”) has not been marked passed. Verify that wave and use omh_status action "gate".`)
+    }
+    if (await $.fs.exists(p.verified(run, task.id))) return fail(`task ${task.id} is already verified`)
+    workerBase = `w${wave.id}-${task.id}`
   }
-  if (await $.fs.exists(p.verified(run, task.id))) return fail(`task ${task.id} is already verified`)
 
   const category = a.category ?? task.category
   if (!cfg.categories[category]) return fail(`unknown category '${category}' (known: ${Object.keys(cfg.categories).join(', ')})`)
   const warnings: string[] = []
-  if (category !== task.category) warnings.push(`category ${category} differs from the plan's ${task.category}`)
+  if (!scout && category !== task.category) warnings.push(`category ${category} differs from the plan's ${task.category}`)
   if (!isUsualPair(intent, category)) warnings.push(`intent ${intent} with category ${category} is unusual; rationale recorded`)
 
   // A task already out with a live worker is not sent twice.
@@ -288,6 +334,7 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
   if (a.worker) {
     worker = ws[a.worker]
     if (!worker) return fail(`no worker '${a.worker}'; leave worker out to have one started, or omh_spawn it`)
+    if (isSubagentWorker(worker)) return fail(`worker '${a.worker}' is a subagent, which runs one task only; leave worker out (or pass its profile) to start a fresh one`)
     const st = await agentStatus($, worker.pane).catch(() => 'unknown')
     if (st === 'gone') return fail(`worker '${a.worker}' is gone; leave worker out to start a fresh one`)
     if (st === 'working' || st === 'blocked' || (!isFree(worker) && worker.task !== task.id)) {
@@ -311,17 +358,28 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
       profile = r.profile
       warnings.push(...r.warnings)
     }
-    // Reuse a free worker on that profile; otherwise start one named after the task.
-    worker = Object.values(ws).find(w => w.profile === profile && isFree(w) && w.phase !== 'gone')
-    if (worker && (await agentStatus($, worker.pane).catch(() => 'gone')) !== 'idle') worker = undefined
-    if (!worker) {
-      const name = await freeName(`w${wave.id}-${task.id}`)
-      const s = await spawn({ name, profile, intent, ...(a.cwd !== undefined && { cwd: a.cwd }) })
-      if ('text' in s) return s
-      worker = s.worker
-      warnings.push(...s.warnings)
+    if (isSubagentProfile(cfg, profile)) {
+      // A subagent is started below, once its brief is written; one per task, never reused.
+      if (cfg.maxConcurrent > 0) {
+        const live = Object.values(ws).filter(w => w.phase !== 'gone' && !(isSubagentWorker(w) && !ACTIVE.has(w.phase))).length
+        if (live >= cfg.maxConcurrent) return fail(`max_concurrent=${cfg.maxConcurrent} workers already running; wait for one or tear one down`)
+      }
+      const prof = cfg.profiles[profile]!
+      worker = newWorker({ name: await freeName(workerBase), pane: subagentPane('starting'), profile, family: prof.family, agent: prof.agent })
+    } else {
+      // Reuse a free pane worker on that profile; otherwise start one named after the task.
+      worker = Object.values(ws).find(w => w.profile === profile && isFree(w) && w.phase !== 'gone' && !isSubagentWorker(w))
+      if (worker && (await agentStatus($, worker.pane).catch(() => 'gone')) !== 'idle') worker = undefined
+      if (!worker) {
+        const name = await freeName(workerBase)
+        const s = await spawn({ name, profile, intent, ...(a.cwd !== undefined && { cwd: a.cwd }) })
+        if ('text' in s) return s
+        worker = s.worker
+        warnings.push(...s.warnings)
+      }
     }
   }
+  const sub = isSubagentWorker(worker)
 
   const prof = cfg.profiles[worker.profile]
   const dir = p.task(run, task.id)
@@ -332,19 +390,27 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
     a.brief.trim(),
     '',
     `## Files you own`,
-    task.owns.length > 0 ? task.owns.map(f => `- ${f}`).join('\n') : '- (none listed: change nothing outside what the task needs)',
+    scout
+      ? '- None. This is a read-only scout: do not create, change or delete any file in the project. Your only write is the report below. Back every finding with file:line (or a URL for external docs).'
+      : task.owns.length > 0
+        ? task.owns.map(f => `- ${f}`).join('\n')
+        : '- (none listed: change nothing outside what the task needs)',
     '',
-    '## How to report back (required)',
-    'When you are finished — or cannot continue — write your report to:',
-    '',
-    `    ${result}`,
-    '',
-    'Include: summary of what you did or found, files changed (if any), how you verified it (commands and their outcome), and open questions or risks.',
-    'Then reply in the chat with exactly one line and nothing else:',
-    `DONE ${result}`,
-    'or',
-    'BLOCKED <one-sentence reason>',
-    '',
+    ...(sub
+      ? subagentReporting(result)
+      : [
+          '## How to report back (required)',
+          'When you are finished — or cannot continue — write your report to:',
+          '',
+          `    ${result}`,
+          '',
+          'Include: summary of what you did or found, files changed (if any), how you verified it (commands and their outcome), and open questions or risks.',
+          'Then reply in the chat with exactly one line and nothing else:',
+          `DONE ${result}`,
+          'or',
+          'BLOCKED <one-sentence reason>',
+          '',
+        ]),
   ]
     .filter(x => x !== null)
     .join('\n')
@@ -359,7 +425,7 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
     worker: worker.name,
     profile: worker.profile,
     family: worker.family,
-    model: prof ? prof.args.join(' ') : '',
+    model: prof ? (sub ? `${prof.subagentType ?? 'general-purpose'} ${prof.model ?? 'inherit'}` : prof.args.join(' ')) : '',
     intent,
     category,
     rationale: a.rationale.trim(),
@@ -371,24 +437,66 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
     diagnose: null,
   }
   await writeJson($, p.dispatch(run, task.id), record)
-  const wf = await readJson<WorkerFile>($, p.agent(worker.name))
-  if (wf) await writeJson($, p.agent(worker.name), { ...wf, run, task: task.id, task_dir: dir, category })
+  const instruction = `Read the file ${p.brief(run, task.id)} and carry out the task it describes. Follow its reporting instructions at the end exactly.`
 
-  try {
-    await herdr($, ['agent', 'prompt', worker.name, `Read the file ${p.brief(run, task.id)} and carry out the task it describes. Follow its reporting instructions at the end exactly.`])
-  } catch (err) {
-    return fail(`prompt failed for '${worker.name}': ${(err as Error).message}${err instanceof HerdrError && err.code === 'agent_blocked' ? ' — it is waiting on a dialog; read it with herdr agent read and ask the user' : ''}`)
+  if (sub) {
+    const started = await startSubagent(worker, prof, instruction, `omh ${task.id}`, a.cwd ?? p.root, { run, task: task.id, dir, category, at: now })
+    if ('text' in started) {
+      if (prev) await writeJson($, p.dispatch(run, task.id), prev)
+      else await remove($, p.dispatch(run, task.id))
+      return started
+    }
+    worker = started
+  } else {
+    const wf = await readJson<WorkerFile>($, p.agent(worker.name))
+    if (wf) await writeJson($, p.agent(worker.name), { ...wf, run, task: task.id, task_dir: dir, category })
+    try {
+      await herdr($, ['agent', 'prompt', worker.name, instruction])
+    } catch (err) {
+      return fail(`prompt failed for '${worker.name}': ${(err as Error).message}${err instanceof HerdrError && err.code === 'agent_blocked' ? ' — it is waiting on a dialog; read it with herdr agent read and ask the user' : ''}`)
+    }
+    await feed(worker.name, { kind: 'dispatch', at: now, task: task.id, run })
   }
-  await feed(worker.name, { kind: 'dispatch', at: now, task: task.id, run })
   await refreshRun()
   return ok(
     [
-      `dispatched ${task.id} (${task.title}) → ${worker.name} [${worker.profile}, ${worker.family}]`,
+      `dispatched ${scout ? 'scout ' : ''}${task.id}${scout ? '' : ` (${task.title})`} → ${worker.name} [${worker.profile}, ${worker.family}${sub ? ', subagent' : ''}]`,
       `brief: ${p.brief(run, task.id)}`,
       ...warnings.map(w => `note: ${w}`),
-      'Do not wait or poll. Keep working on something else or end your turn: you will be woken when the wave settles or a worker needs you.',
+      scout
+        ? 'Do not wait or poll. Send the other scouts (and any Explore subagents) now, then end your turn: you will be woken when every scout is back.'
+        : 'Do not wait or poll. Keep working on something else or end your turn: you will be woken when the wave settles or a worker needs you.',
     ].join('\n'),
   )
+}
+
+/** Start the subagent for a task, record it as a worker and feed the state machine; the worker, or why it did not start. */
+async function startSubagent(
+  w: OmhWorker,
+  prof: Config['profiles'][string] | undefined,
+  prompt: string,
+  description: string,
+  cwd: string,
+  t: { run: string; task: string; dir: string; category: string; at: number },
+): Promise<OmhWorker | Answer> {
+  const $ = host()
+  const p = paths()
+  const r = await $.agent
+    .spawn({ prompt, description, subagentType: prof?.subagentType ?? 'general-purpose', ...(prof?.model !== undefined && { model: prof.model }), cwd })
+    .catch(err => ({ deny: (err as Error).message }) as const)
+  if (r.deny !== undefined || !r.agentId) return fail(`the subagent for ${t.task} did not start: ${r.deny ?? 'no agent id came back'}`)
+  const worker: OmhWorker = { ...w, pane: subagentPane(r.agentId) }
+  const file: WorkerFile = { name: w.name, category: t.category, profile: w.profile, family: w.family, agent: w.agent, pane: worker.pane, cwd, run: t.run, task: t.task, task_dir: t.dir }
+  await writeJson($, p.agent(w.name), file)
+  await setWorker(worker)
+  await feed(w.name, { kind: 'dispatch', at: t.at, task: t.task, run: t.run })
+  // Spawned means started: it is working from here on.
+  await feed(w.name, { kind: 'status', status: 'working', at: await $.clock.now() })
+  armSubagentPoll()
+  // An end heard before the worker was recorded (a very quick subagent) is applied now.
+  const early = rt.subagentEnds.get(r.agentId)
+  if (early) await onSubagentEnd(r.agentId, early.reason, early.answer)
+  return (await workers())[w.name] ?? worker
 }
 
 async function freeName(base: string): Promise<string> {
@@ -436,7 +544,7 @@ export async function draftPlan(markdown: string): Promise<Answer> {
   return ok(
     [
       `plan.md written: ${p.draft} (${lines} lines). It is not approved yet.`,
-      'Now give the user a short summary (goal, the tasks, anything you need them to decide) and the path, then END YOUR TURN.',
+      'Now give the user a short summary (goal, the tasks, anything you need them to decide) and the path, tell them `/omh plan` previews it in a pane beside you, then END YOUR TURN.',
       'Do not write plan.json or dispatch anything: the user reads or edits plan.md and approves it with /omh approve, which wakes you to derive the waves. If they ask for changes, draft again.',
     ].join('\n'),
   )
@@ -451,6 +559,49 @@ export async function approvePlan(): Promise<Answer> {
   await $.fs.write(p.approval, `${draftDigest(draft)}\n`)
   const title = draft.trim().split('\n').find(l => l.trim() !== '')?.replace(/^#+\s*/, '') ?? 'plan'
   return ok(`approved plan.md: ${title}`)
+}
+
+/** The shell line that shows plan.md: the first of leaf (live reload), glow, bat, less that is installed. */
+export function planViewerLine(file: string): string {
+  const f = shellQuote(file)
+  return [
+    `if command -v leaf >/dev/null 2>&1; then leaf --watch ${f}`,
+    `elif command -v glow >/dev/null 2>&1; then glow -p ${f}`,
+    `elif command -v bat >/dev/null 2>&1; then bat --paging=always --language=markdown ${f}`,
+    `else less -R ${f}; fi; exit`,
+  ].join('; ')
+}
+
+/** The plan.md to show: the draft, else the approved plan.md of the current run; null when neither has text. */
+export async function planFile(): Promise<string | null> {
+  const $ = host()
+  const p = paths()
+  if (await hasText($, p.draft)) return p.draft
+  const run = await currentRunId($, p)
+  return run !== null && (await hasText($, p.planMd(run))) ? p.planMd(run) : null
+}
+
+/** /omh plan without prismantis: open plan.md in a herdr pane beside the lead, or close that pane if it is open. */
+export async function togglePlanView(): Promise<Answer> {
+  const $ = host()
+  const p = paths()
+  const open = await readJson<{ pane: string }>($, p.planView)
+  if (open && (await paneExists($, open.pane))) {
+    await closePane($, open.pane).catch(() => undefined)
+    await remove($, p.planView)
+    return ok('plan preview closed')
+  }
+  const file = await planFile()
+  if (file === null) return fail(`no plan.md yet (${p.draft}); the lead writes it with omh_status action "draft"`)
+  if (rt.selfPane === null) return fail('cannot tell which herdr pane is the lead (HERDR_PANE_ID is not set)')
+  try {
+    const pane = await splitPane($, rt.selfPane, 'right', p.root)
+    await writeJson($, p.planView, { pane })
+    await herdr($, ['pane', 'run', pane, planViewerLine(file)])
+    return ok(`plan preview opened beside you (${file}); quit the viewer or run /omh plan again to close it`)
+  } catch (err) {
+    return fail(`could not open the preview: ${(err as Error).message}`)
+  }
 }
 
 export async function writePlan(raw: unknown, newRun: boolean): Promise<Answer> {
@@ -497,6 +648,10 @@ export async function closeTask(taskId: string, quality: string, how: 'verified'
   const $ = host()
   const p = paths()
   if (!quality?.trim()) return fail('quality is required: one line on how good the result was (what held up, what you had to fix)')
+  if (isScout(taskId)) {
+    if (how === 'verified') return fail(`${taskId} is a scout: omh_collect closes it (there is nothing to verify); use action "abandon" for one without a usable report`)
+    return (await closeScout(taskId, quality.trim())) ?? ok(`scout ${taskId} abandoned`)
+  }
   const run = await currentRunId($, p)
   if (run === null) return fail('no run in progress')
   const plan = await loadPlan(run)
@@ -541,9 +696,41 @@ export async function status(form: 'full' | 'brief' = 'full'): Promise<Answer> {
   return ok((form === 'brief' ? statusBrief : statusText)(view, await workers()))
 }
 
+/** Close a scout: mark it collected (or abandoned, with a quality note) and free its worker. */
+async function closeScout(taskId: string, quality: string | null): Promise<Answer | null> {
+  const $ = host()
+  const p = paths()
+  if (!(await $.fs.exists(p.dispatch(SCOUT_RUN, taskId)))) return fail(`no scout '${taskId}' was dispatched`)
+  const holder = Object.values(await workers()).find(w => w.run === SCOUT_RUN && w.task === taskId)
+  if (holder && (holder.phase === 'running' || holder.phase === 'dispatched' || holder.phase === 'checking')) {
+    return fail(`scout ${taskId} is still with worker '${holder.name}' (${holder.phase}); wait until it settles`)
+  }
+  const closing: Closing = { at: await $.clock.now(), quality: quality ?? 'collected' }
+  await writeJson($, p.collected(SCOUT_RUN, taskId), closing)
+  if (quality !== null) await recordHistory(SCOUT_RUN, taskId, closing, 'abandoned')
+  if (holder) await setWorker({ ...holder, phase: holder.phase === 'gone' ? 'gone' : 'idle', task: null, run: null, diagnosis: null })
+  return quality === null ? null : ok(`scout ${taskId} abandoned; its worker is free.`)
+}
+
 export async function collect(taskId: string): Promise<Answer> {
   const $ = host()
   const p = paths()
+  if (isScout(taskId)) {
+    if (!SCOUT_ID.test(taskId)) return fail(`bad scout id '${taskId}'`)
+    const file = p.result(SCOUT_RUN, taskId)
+    if (!(await hasText($, file))) return fail(`no report from scout '${taskId}' yet (${file})`)
+    const text = (await $.fs.read(file)).trim()
+    const closed = await closeScout(taskId, null)
+    if (closed !== null) return closed
+    return ok(
+      [
+        `===== scout ${taskId} (${file}) =====`,
+        text,
+        '=====',
+        'Scout closed and its worker freed. Its findings are claims: spot-check the file:line evidence you build the plan on.',
+      ].join('\n'),
+    )
+  }
   const run = await currentRunId($, p)
   if (run === null) return fail('no run in progress')
   if (!TASK_ID.test(taskId)) return fail(`bad task id '${taskId}'`)
@@ -578,6 +765,14 @@ export async function teardown(names: string[] | undefined): Promise<Answer> {
       lines.push(`${n}: refusing to close the lead's own pane`)
       continue
     }
+    if (isSubagentPane(pane)) {
+      // No call stops a subagent from here: forget it; one still running finishes on its own.
+      const w = ws[n]
+      lines.push(`${n}: subagent forgotten${w && ACTIVE.has(w.phase) ? ' (still running: it finishes on its own; stop it from the agents view if needed)' : ''}`)
+      await remove($, p.agent(n))
+      await dropWorker(n)
+      continue
+    }
     if (await paneExists($, pane)) {
       try {
         await closePane($, pane)
@@ -598,35 +793,57 @@ export async function teardown(names: string[] | undefined): Promise<Answer> {
 
 export async function check(): Promise<Answer> {
   const $ = host()
-  const lines: string[] = []
-  const row = (k: string, v: string) => lines.push(`${k.padEnd(26)} ${v}`)
-  row('inside herdr', (await $.env.get('HERDR_ENV')) === '1' ? `yes (pane ${rt.selfPane ?? '?'})` : 'NO — oh-my-herdr needs herdr')
   const which = async (bin: string) => (await $.process.run(['sh', '-c', 'command -v "$1"', 'sh', bin]).catch(() => null))?.stdout.trim() || null
-  for (const bin of ['herdr', 'python3', 'git']) row(bin, (await which(bin)) ? 'ok' : 'MISSING')
+  const env: string[][] = [['inside herdr', (await $.env.get('HERDR_ENV')) === '1' ? `✅ yes (pane ${rt.selfPane ?? '?'})` : '⛔ no: oh-my-herdr needs herdr']]
+  for (const bin of ['herdr', 'python3', 'git']) env.push([bin, (await which(bin)) ? '✅ ok' : '⛔ missing'])
   let cfg: Config
   try {
     cfg = await config()
   } catch (err) {
-    row('config', `ERROR ${(err as Error).message}`)
-    return fail(lines.join('\n'))
+    return fail(['oh-my-herdr check: the config did not load.', '', table(['Check', 'Result'], [...env, ['config', `⛔ ${(err as Error).message}`]])].join('\n'))
   }
-  lines.push('', `== agents used by profiles ==`)
+  const agents: string[][] = []
   for (const a of new Set(Object.values(cfg.profiles).map(pr => pr.agent))) {
     const spec = cfg.agents[a]
-    row(a, spec ? ((await which(spec.bin)) ? `ok (${spec.bin}, ${spec.launch})` : `MISSING ${spec.bin}`) : 'unknown agent')
+    if (spec?.launch === 'subagent') agents.push([a, 'subagent', '✅ a Claude Code subagent of this session'])
+    else if (!spec) agents.push([a, '', '⛔ unknown agent'])
+    else agents.push([a, spec.launch, (await which(spec.bin)) ? `✅ ${code(spec.bin)}` : `⛔ missing ${code(spec.bin)}`])
   }
-  lines.push('', `== config: ${cfg.file} ==`)
   const problems = configProblems(cfg)
-  for (const pr of problems) lines.push(`  problem: ${pr}`)
-  lines.push('profiles:')
-  for (const [n, pr] of Object.entries(cfg.profiles)) lines.push(`  ${n.padEnd(16)} ${pr.agent.padEnd(8)} ${pr.family.padEnd(9)} ${providerOf(pr) ?? '-'}  ${pr.args.join(' ')}`)
-  lines.push('categories (first usable wins):')
-  for (const [n, c] of Object.entries(cfg.categories)) lines.push(`  ${n.padEnd(20)} ${c.profiles.join(' → ')}`)
-  lines.push('', '== quota ==')
+  const profiles = Object.entries(cfg.profiles).map(([n, pr]) => [
+    n,
+    pr.agent,
+    pr.family,
+    providerOf(pr) ?? '-',
+    pr.subagentType !== undefined ? `${pr.subagentType} · ${pr.model ?? 'inherit'}` : pr.args.length > 0 ? code(pr.args.join(' ')) : '',
+  ])
+  const categories = Object.entries(cfg.categories).map(([n, c]) => [n, c.profiles.join(' → ')])
   await refreshQuota(undefined, true)
-  lines.push(formatQuota(cfg, await $.state.quota.get()))
-  lines.push('', `project: ${paths().root}`, `state:   ${paths().omh}`, `history: ${await historyFile()}`)
-  return { ok: problems.length === 0, text: lines.join('\n') }
+  const text = [
+    `oh-my-herdr check · config ${code(cfg.file)} · ${problems.length === 0 ? 'no problems' : `${problems.length} problem${problems.length === 1 ? '' : 's'}`}`,
+    '',
+    table(['Check', 'Result'], env),
+    ...(problems.length > 0 ? ['', '### Problems', '', ...problems.map(pr => `- ⛔ ${pr}`)] : []),
+    '',
+    '### Agents',
+    '',
+    table(['Agent', 'Launch', 'Result'], agents),
+    '',
+    `### Profiles · at most ${cfg.maxConcurrent || '∞'} workers, ${cfg.maxPanesPerTab} panes a tab`,
+    '',
+    table(['Profile', 'Agent', 'Family', 'Bills', 'Runs'], profiles),
+    '',
+    '### Categories · the first usable profile wins',
+    '',
+    table(['Category', 'Profiles'], categories),
+    '',
+    '### Quota',
+    '',
+    formatQuota(cfg, await $.state.quota.get()),
+    '',
+    `project ${code(paths().root)} · state ${code(paths().omh)} · history ${code(await historyFile())}`,
+  ].join('\n')
+  return { ok: problems.length === 0, text }
 }
 
 export async function quotaReport(): Promise<Answer> {

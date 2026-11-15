@@ -4,16 +4,18 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { approvePlan, check, closeTask, collect, dispatch, draftPlan, passGate, quotaReport, spawn, status, teardown, writePlan, type Answer } from './lib/actions'
+import { approvePlan, check, closeTask, collect, dispatch, draftPlan, passGate, planFile, quotaReport, spawn, status, teardown, togglePlanView, writePlan, type Answer } from './lib/actions'
 import { BOARD_ID, boardView } from './lib/board'
 import { bind, readEnv } from './lib/engine'
 import { Paths } from './lib/files'
 import { ownerOf, relativeTo } from './lib/guards'
-import { loadPlan, config, flushWake, optionsOf, reconcile, refreshQuota, refreshRun, rt, workers } from './lib/runtime'
+import { loadPlan, config, flushWake, onSubagentEnd, optionsOf, reconcile, refreshQuota, refreshRun, rt, workers } from './lib/runtime'
+import { subagentIdOf } from './lib/subagent'
 import { ACTIVE } from './lib/settle'
 import { statusText, ulwPrompt } from './lib/text'
 import { progressPanel, statusTail } from './lib/statusbar'
-import { compactCall, compactResult, OMH_TOOL } from './lib/toolrow'
+import { compactCall, compactResult, OMH_TOOL, resultText } from './lib/toolrow'
+import { drawMarkdown, hasPrismantis, looksLikeMarkdown, splitCollected } from './lib/prismantis'
 
 // The same refs as hooks/lib/engine.ts: a read must name a const of its own file, and a read made
 // while drawing subscribes the drawing to the value.
@@ -23,6 +25,9 @@ const QUOTA = atom({ plugin: 'oh-my-herdr', key: 'quota' } as const, {}, { shape
 const CONTINUE = atom({ plugin: 'oh-my-herdr', key: 'continueCount' } as const, 0)
 const BOARD_OPEN = atom({ plugin: 'oh-my-herdr', key: 'boardOpen' } as const, false)
 
+/** /omh plan's pane when prismantis draws it; without prismantis plan.md shows in a herdr pane instead. */
+const PLAN_ID = 'omh-plan'
+
 const TOOLS = [
   {
     name: 'omh_dispatch',
@@ -30,13 +35,14 @@ const TOOLS = [
       'Send one task of the current plan to a worker agent in a herdr pane, and return at once.',
       'Intent Gate: decide the task\'s intent and category first and say why in `rationale`. The worker\'s agent and model are chosen from the category by the config and current quota; leave `worker` and `profile` out unless the user asked for one.',
       'Never wait or poll after dispatching: you are woken with a results table when the wave settles, or at once when a worker is blocked, stalled or dies (with a diagnosis).',
+      'Scouts: a task id `scout-<name>` with intent explore or research needs no plan — use them while exploring before plan.md, several at once, for long reads or external docs on cheaper models. They are read-only, have no wave or gate, and you are woken once all scouts are back; omh_collect closes each.',
     ].join(' '),
     inputSchema: {
       type: 'object',
       properties: {
-        task: { type: 'string', description: 'Task id from plan.json' },
+        task: { type: 'string', description: 'Task id from plan.json, or `scout-<name>` for a read-only scout before/beside the plan' },
         intent: { type: 'string', enum: ['explore', 'research', 'implement', 'fix', 'review', 'plan', 'write'] },
-        category: { type: 'string', description: 'Routing category (defaults to the plan\'s)' },
+        category: { type: 'string', description: 'Routing category (defaults to the plan\'s; for a scout, explore — or librarian for research)' },
         rationale: { type: 'string', description: 'One line: why this intent and category fit' },
         brief: { type: 'string', description: 'Markdown brief: goal, context, constraints, acceptance checks. The files the task owns and the reporting contract are appended for you.' },
         worker: { type: 'string', description: 'Reuse this free worker by name (optional)' },
@@ -52,7 +58,7 @@ const TOOLS = [
     description: [
       'The run\'s plan and progress. action "show": waves, tasks, workers. "draft": write plan.md, the plan in prose (goal, findings with file:line, approach, tasks with acceptance checks, risks, open questions); then summarise it for the user and end your turn — they approve it with /omh approve.',
       '"plan": only after plan.md is approved, save plan.json derived from it (goal; waves with id, gate and tasks; each task id, title, intent, category, owns[], deps[]); tasks in one wave must not own the same files. Each plan.json needs plan.md approved again.',
-      '"verified" / "abandon": close a task with a one-line `quality` note on how good the result was. "gate": mark a wave\'s gate passed once all its tasks are closed; the next wave cannot be dispatched before that.',
+      '"verified" / "abandon": close a task with a one-line `quality` note on how good the result was ("abandon" also closes a scout that brought nothing back). "gate": mark a wave\'s gate passed once all its tasks are closed; the next wave cannot be dispatched before that.',
     ].join(' '),
     inputSchema: {
       type: 'object',
@@ -71,7 +77,7 @@ const TOOLS = [
   },
   {
     name: 'omh_collect',
-    description: 'Read a task\'s result.md. It is the worker\'s claim: verify it yourself before marking the task verified.',
+    description: 'Read a task\'s result.md. It is the worker\'s claim: verify it yourself before marking the task verified. For a scout (`scout-*`), collecting also closes it and frees its worker.',
     inputSchema: { type: 'object', properties: { task: { type: 'string' } }, required: ['task'] },
   },
   {
@@ -172,7 +178,7 @@ export const register: Register = (on, options) => {
     await Promise.all([
       ...TOOLS.map(t => $.tool.register({ name: t.name, description: t.description, inputSchema: t.inputSchema as unknown as Record<string, unknown>, isDeferred: false }).catch(() => undefined)),
       $.command.register({ name: 'ulw', description: 'oh-my-herdr: ultrawork — plan, fan out to herdr workers, verify', argumentHint: '<goal>' }).catch(() => undefined),
-      $.command.register({ name: 'omh', description: 'oh-my-herdr: status | approve | quota | check | board | teardown', argumentHint: 'status [full]|approve|quota|check|board|teardown', immediate: true }).catch(() => undefined),
+      $.command.register({ name: 'omh', description: 'oh-my-herdr: status | plan | approve | quota | check | board | teardown', argumentHint: 'status [full]|plan|approve|quota|check|board|teardown', immediate: true }).catch(() => undefined),
     ])
     // Reattaching watchers reads herdr and the disk: keep it out of the session's start.
     $.clock.after(0, () => {
@@ -202,6 +208,8 @@ export const register: Register = (on, options) => {
       const name = tool.replace(/^mcp__oh-my-herdr__/, '')
       try {
         const answer = await serve(name, args)
+        // A new draft redraws an open plan pane.
+        if (answer.ok && name === 'omh_status' && (args as { action?: unknown }).action === 'draft') $.ui.invalidate('ui.render')
         return { result: answer.ok ? answer.text : `ERROR: ${answer.text}` }
       } catch (err) {
         return { result: `ERROR: ${name} failed: ${(err as Error).message}` }
@@ -245,6 +253,17 @@ export const register: Register = (on, options) => {
         }
         return { text: answer.text }
       }
+      case 'plan': {
+        if (!(await hasPrismantis($ as never, 'terminal'))) return { text: (await togglePlanView()).text }
+        if ((await $.ui.panes()).some((p: { id: string }) => p.id === PLAN_ID)) {
+          await $.ui.close({ id: PLAN_ID })
+          return { text: 'plan preview closed' }
+        }
+        const file = await planFile()
+        if (file === null) return { text: 'no plan.md yet; the lead writes it with omh_status action "draft"' }
+        const r = await $.ui.open({ id: PLAN_ID, title: 'plan.md' })
+        return { text: r.isPlaced ? `plan preview opened (${file}); /omh plan again closes it` : `plan preview will show when there is room${'reason' in r && r.reason ? ` (${r.reason})` : ''}` }
+      }
       case 'board': {
         const isOpen = (await $.ui.panes()).some((p: { id: string }) => p.id === BOARD_ID)
         if (isOpen) {
@@ -257,7 +276,7 @@ export const register: Register = (on, options) => {
         return { text: r.isPlaced ? 'board opened' : `board will show when there is room${'reason' in r && r.reason ? ` (${r.reason})` : ''}` }
       }
       default:
-        return { text: 'usage: /omh status [full] | approve | quota | check | board | teardown' }
+        return { text: 'usage: /omh status [full] | plan | approve | quota | check | board | teardown' }
     }
   }).catch(() => ({ text: 'oh-my-herdr: the command failed; see the debug log' }))
 
@@ -268,6 +287,21 @@ export const register: Register = (on, options) => {
     return boardView(el, await read($, RUN), await read($, WORKERS), await read($, QUOTA), (e.viewport?.rows ?? 30) - 2) as never
   })
 
+  // plan.md drawn by prismantis, read fresh on every draw.
+  on('ui.render', { component: 'Pane', requestId: PLAN_ID }, async ($, e) => {
+    const { Box, Text } = $.ui.resolve(e) as { Box: any; Text: any }
+    const file = await planFile()
+    const text = file === null ? null : await $.fs.read(file).catch(() => null)
+    if (file === null || text === null) return (<Text dimColor>No plan.md yet. The lead writes it with omh_status action "draft".</Text>) as never
+    const drawn = await drawMarkdown($ as never, e.surface, text, e.props.bodyColumns)
+    return (
+      <Box flexDirection="column">
+        <Text dimColor wrap="truncate-end">{file}</Text>
+        {(drawn ?? <Text>{text}</Text>) as never}
+      </Box>
+    ) as never
+  })
+
   // One line per omh_* call and the first line of its result, unless `verbose` is on or the view
   // is expanded (ctrl+o, --verbose).
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
@@ -276,8 +310,28 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    if (rt.options.verbose || e.props.isExpanded === true || !OMH_TOOL.test(e.props.tool)) return next(e)
-    return compactResult($.ui.resolve(e) as never, e.props) as never
+    if (!OMH_TOOL.test(e.props.tool)) return next(e)
+    if (!rt.options.verbose && e.props.isExpanded !== true) return compactResult($.ui.resolve(e) as never, e.props) as never
+    // Shown in full: a worker's report (omh_collect) or a result with tables drawn by prismantis.
+    if (e.props.isErrored) return next(e)
+    const text = resultText(e.props.output)
+    const columns = (e.viewport?.columns ?? 80) - 6
+    const { Box, Text } = $.ui.resolve(e) as { Box: any; Text: any }
+    const parts = splitCollected(text)
+    if (parts !== null) {
+      const drawn = await drawMarkdown($ as never, e.surface, parts.body, columns)
+      if (drawn === null) return next(e)
+      return (
+        <Box flexDirection="column" paddingLeft={5}>
+          <Text dimColor>{parts.header}</Text>
+          {drawn as never}
+          {parts.footer ? <Text dimColor>{parts.footer}</Text> : ''}
+        </Box>
+      ) as never
+    }
+    if (!looksLikeMarkdown(text)) return next(e)
+    const drawn = await drawMarkdown($ as never, e.surface, text, columns)
+    return drawn === null ? next(e) : ((<Box paddingLeft={5}>{drawn as never}</Box>) as never)
   })
 
   // ---------------------------------------------------------------- status line / panel (`display`)
@@ -318,6 +372,12 @@ export const register: Register = (on, options) => {
     const plan = await loadPlan(run.id)
     const owner = plan ? ownerOf(rel, plan, run) : null
     if (owner === null) return next(e)
+    // The subagent that owns the file is the one writing it.
+    const caller = (e as { agentId?: string }).agentId
+    if (caller !== undefined && owner.worker !== null) {
+      const w = (await read($, WORKERS))[owner.worker]
+      if (w && subagentIdOf(w) === caller) return next(e)
+    }
     return {
       deny: `oh-my-herdr: ${rel} belongs to task ${owner.task}${owner.worker ? ` (worker ${owner.worker})` : ''}, which is still running (owns ${owner.owns}). Wait until it settles, or abandon/tear down that task first.`,
     }
@@ -345,11 +405,23 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     if (live() && e.origin.kind === 'composer') await update($, CONTINUE, () => 0)
-    return next(e)
+    // A worker subagent's own "task finished" notification: the mod wakes the lead once its wave
+    // (or the scouts) settles, with every result, so this one would only interrupt.
+    if (!live() || e.origin.kind !== 'task-notification') return next(e)
+    const ids = Object.values(await read($, WORKERS))
+      .map(subagentIdOf)
+      .filter((id): id is string => id !== null)
+    const hit = ids.find(id => e.text.includes(id))
+    if (hit === undefined) return next(e)
+    return { drop: `oh-my-herdr: worker subagent ${hit} finished; its report is in result.md and the lead is woken when the wave settles` }
   }).catch(($, e, next) => next(e))
+
+
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    // A worker subagent's run ended: its answer is its report.
+    if (live() && e.agentId !== undefined) void onSubagentEnd(e.agentId, e.reason, e.answer).catch(() => undefined)
     if (!live() || !rt.options.autoContinue || e.agentId !== undefined || e.reason !== 'answer') return result
     void maybeContinue($).catch(() => undefined)
     return result
