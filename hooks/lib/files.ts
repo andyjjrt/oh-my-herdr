@@ -1,7 +1,7 @@
 // The .omh/ directory: the source of truth the mod's state is rebuilt from.
 //
 //   .omh/agents/<name>.json            one worker: pane, profile, family, agent, task, run
-//   .omh/tab.json                      the omh-workers tab and its root pane
+//   .omh/tab.json                      { tabs: [...] } the omh-workers tabs and their root panes
 //   .omh/current-run                   id of the run the mod follows
 //   .omh/status.json                   the current run's progress, for a custom status line (statusline/)
 //   .omh/plan.md                       the plan in prose the lead drafts and the user approves

@@ -32,7 +32,11 @@ export type QuotaConfig = {
   threshold: number
   cacheSeconds: number
   onUnknown: 'allow' | 'block'
-  providers: Record<string, { enabled?: boolean }>
+  /**
+   * Per provider: `enabled: false` skips its checks; `command` (a shell line) makes it a provider of
+   * the user's own, read by running the command (hooks/lib/quota.ts, parseCommandQuota).
+   */
+  providers: Record<string, { enabled?: boolean; command?: string }>
 }
 
 export type Config = {
@@ -77,6 +81,23 @@ export function normalizeAgent(name: string, raw: unknown): AgentSpec {
   }
 }
 
+/** `"name": "<command>"` is short for `{ "command": "<command>" }`. */
+function normalizeProviders(raw: unknown): QuotaConfig['providers'] {
+  const out: QuotaConfig['providers'] = {}
+  for (const [name, v] of Object.entries(asRecord(raw))) {
+    if (typeof v === 'string') {
+      if (v.trim()) out[name] = { command: v.trim() }
+      continue
+    }
+    const r = asRecord(v)
+    out[name] = {
+      ...(typeof r.enabled === 'boolean' && { enabled: r.enabled }),
+      ...(typeof r.command === 'string' && r.command.trim() !== '' && { command: r.command.trim() }),
+    }
+  }
+  return out
+}
+
 export function normalizeConfig(file: string, raw: unknown, builtinAgents: unknown): Config {
   const r = asRecord(raw)
   const q = asRecord(r.quota)
@@ -113,7 +134,7 @@ export function normalizeConfig(file: string, raw: unknown, builtinAgents: unkno
       threshold: typeof q.threshold === 'number' ? q.threshold : 95,
       cacheSeconds: typeof q.cache_seconds === 'number' ? q.cache_seconds : 120,
       onUnknown: q.on_unknown === 'block' ? 'block' : 'allow',
-      providers: asRecord(q.providers) as QuotaConfig['providers'],
+      providers: normalizeProviders(q.providers),
     },
     profiles,
     categories,
@@ -139,6 +160,10 @@ export function configProblems(cfg: Config): string[] {
     for (const p of c.profiles) if (!cfg.profiles[p]) out.push(`category '${name}' lists undefined profile '${p}'`)
   }
   if (cfg.lead !== null && !cfg.profiles[cfg.lead]) out.push(`lead profile '${cfg.lead}' is not defined`)
+  const known = new Set(['claude', 'opencode-go', ...Object.keys(cfg.quota.providers).filter(n => cfg.quota.providers[n]!.command !== undefined)])
+  for (const [name, p] of Object.entries(cfg.profiles)) {
+    if (typeof p.quota === 'string' && !known.has(p.quota)) out.push(`profile '${name}' bills quota '${p.quota}', which is neither built in nor given a "command" under quota.providers`)
+  }
   return out
 }
 

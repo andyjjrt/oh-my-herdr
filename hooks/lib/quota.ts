@@ -8,8 +8,34 @@ import type { Engine } from './engine'
 import type { OmhQuota, OmhQuotaWindow } from '../../types'
 import type { Config, Profile } from './config'
 
+/** Providers read by the mod itself; any other is the user's own, with a `command` in the config. */
 export const PROVIDERS = ['claude', 'opencode-go'] as const
-export type Provider = (typeof PROVIDERS)[number]
+type Builtin = (typeof PROVIDERS)[number]
+export type Provider = string
+
+const isBuiltin = (p: string): p is Builtin => (PROVIDERS as readonly string[]).includes(p)
+
+/** Every provider checked: the built-in ones, then those the config gives a command. */
+export function providersOf(cfg: Config | null): string[] {
+  const own = Object.entries(cfg?.quota.providers ?? {})
+    .filter(([name, p]) => p.command !== undefined && !isBuiltin(name))
+    .map(([name]) => name)
+  return [...PROVIDERS, ...own]
+}
+
+/**
+ * What a provider's command prints: one number, the percent used; or `{ "<window>": <percent>, … }`.
+ * Anything else is not usage.
+ */
+export function parseCommandQuota(stdout: string): { windows: OmhQuotaWindow[]; limitReached: boolean } {
+  const v: unknown = JSON.parse(stdout.trim())
+  const windows: OmhQuotaWindow[] =
+    typeof v === 'number'
+      ? [{ name: 'usage', usedPercent: v, resetsAt: null, scope: null }]
+      : Object.entries(rec(v)).flatMap(([name, n]) => (num(n) === null ? [] : [{ name, usedPercent: num(n)!, resetsAt: null, scope: null }]))
+  if (windows.some(w => !Number.isFinite(w.usedPercent)) || windows.length === 0) throw new Error('no usage in the output')
+  return { windows, limitReached: false }
+}
 
 type Json = Record<string, unknown>
 const rec = (v: unknown): Json => (v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Json) : {})
@@ -62,9 +88,8 @@ export function parseOpencodeGo(body: unknown): { windows: OmhQuotaWindow[]; lim
 
 /** Which provider a profile bills against; null when it is not tracked. */
 export function providerOf(profile: Profile): Provider | null {
-  if (profile.quota !== undefined) {
-    return PROVIDERS.includes(profile.quota as Provider) ? (profile.quota as Provider) : null
-  }
+  // Named outright (a provider of the user's own is only ever named); null skips the checks.
+  if (profile.quota !== undefined) return profile.quota
   // A subagent runs on the lead's own Claude login.
   if (profile.subagentType !== undefined) return 'claude'
   const args = profile.args.join(' ')
@@ -103,7 +128,8 @@ export function quotaAllows(cfg: Config, quota: Record<string, OmhQuota>, profil
   if (!profile) return `unknown profile '${profileName}'`
   const provider = providerOf(profile)
   if (provider === null || cfg.quota.providers[provider]?.enabled === false) return true
-  const e = evaluate(quota[provider], cfg.quota.threshold, profile.args.join(' '))
+  // The model a per-model window (7d-opus) applies to: in the args, or a subagent profile's `model`.
+  const e = evaluate(quota[provider], cfg.quota.threshold, [...profile.args, profile.model ?? ''].join(' '))
   if (e.status === 'ok') return true
   if (e.status === 'exhausted') return `${provider} quota exhausted: ${e.reason}`
   return cfg.quota.onUnknown === 'block' ? `${provider} quota unknown (${e.reason}); on_unknown=block` : true
@@ -156,7 +182,7 @@ async function opencodeCredential($: Engine): Promise<Credential> {
   return { error: 'no OpenCode Go key — set OPENCODE_API_KEY or `/login` → OpenCode Go in senpi' }
 }
 
-const REQUESTS: Record<Provider, { url: string; headers: Record<string, string>; parse: (b: unknown) => { windows: OmhQuotaWindow[]; limitReached: boolean } }> = {
+const REQUESTS: Record<Builtin, { url: string; headers: Record<string, string>; parse: (b: unknown) => { windows: OmhQuotaWindow[]; limitReached: boolean } }> = {
   claude: {
     url: 'https://api.anthropic.com/api/oauth/usage',
     headers: { 'anthropic-beta': 'oauth-2025-04-20', Accept: 'application/json' },
@@ -169,9 +195,10 @@ const REQUESTS: Record<Provider, { url: string; headers: Record<string, string>;
   },
 }
 
-export async function probe($: Engine, provider: Provider): Promise<OmhQuota> {
+export async function probe($: Engine, provider: Provider, command?: string): Promise<OmhQuota> {
   const checkedAt = await $.clock.now()
   const base = { provider, checkedAt, windows: [], limitReached: false, source: null }
+  if (command !== undefined || !isBuiltin(provider)) return probeCommand($, base, command)
   const cred = provider === 'claude' ? await claudeCredential($, checkedAt) : await opencodeCredential($)
   if ('error' in cred) return { ...base, error: cred.error }
   const req = REQUESTS[provider]
@@ -193,11 +220,24 @@ export async function probe($: Engine, provider: Provider): Promise<OmhQuota> {
   }
 }
 
+/** A provider of the user's own: run its command (sh -c) and read what it prints. */
+async function probeCommand($: Engine, base: Omit<OmhQuota, 'error'>, command: string | undefined): Promise<OmhQuota> {
+  if (command === undefined) return { ...base, error: `no "command" for '${base.provider}' under quota.providers` }
+  const res = await $.process.run(['sh', '-c', command], { timeoutMs: 15_000 }).catch(err => ({ exitCode: -1, stdout: '', stderr: (err as Error).message }))
+  const why = res.stderr.trim().split('\n')[0] ?? ''
+  if (res.exitCode !== 0) return { ...base, error: `command exited ${res.exitCode}${why ? `: ${why}` : ''}` }
+  try {
+    return { ...base, ...parseCommandQuota(res.stdout), error: null, source: 'command' }
+  } catch {
+    return { ...base, error: `command printed no usage (a number, or {"window": percent}): ${res.stdout.trim().slice(0, 80)}` }
+  }
+}
+
 const QUOTA_MARK: Record<string, string> = { ok: '✅ ok', exhausted: '⛔ exhausted', unknown: '❔ unknown' }
 
 /** /omh quota (and the quota part of /omh check): one line of settings, then a table. */
 export function formatQuota(cfg: Config, quota: Record<string, OmhQuota>): string {
-  const rows = PROVIDERS.map(p => {
+  const rows = providersOf(cfg).map(p => {
     if (cfg.quota.providers[p]?.enabled === false) return [p, '· disabled', '', '']
     const q = quota[p]
     const e = evaluate(q, cfg.quota.threshold, '')

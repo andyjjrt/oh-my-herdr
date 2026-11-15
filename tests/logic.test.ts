@@ -6,7 +6,7 @@ import { normalizeConfig } from '../hooks/lib/config'
 import { diagnose } from '../hooks/lib/diagnose'
 import { ownerOf, relativeTo } from '../hooks/lib/guards'
 import { draftDigest, findTask, isApproved, isScout, parsePlan, SCOUT_ID, runView, statusFile, taskStatus, waveProgress, type TaskFacts } from '../hooks/lib/plan'
-import { evaluate, formatQuota, parseClaude, parseOpencodeGo, providerOf, quotaAllows } from '../hooks/lib/quota'
+import { evaluate, formatQuota, parseClaude, parseCommandQuota, parseOpencodeGo, probe, providerOf, providersOf, quotaAllows } from '../hooks/lib/quota'
 import { cell, table } from '../hooks/lib/md'
 import { isUsualPair, pickProfile } from '../hooks/lib/route'
 import { newWorker, step, type SettleFacts } from '../hooks/lib/settle'
@@ -425,6 +425,60 @@ describe('plan preview', () => {
   })
 })
 
+describe('quota of your own (a command)', () => {
+  const OWN = normalizeConfig(
+    '/cfg/config.json',
+    {
+      quota: { threshold: 90, providers: { openrouter: '~/q/openrouter.sh', claude: { enabled: true }, off: { enabled: false } } },
+      profiles: {
+        'or-qwen': { agent: 'senpi', family: 'qwen', quota: 'openrouter', args: ['--provider', 'openrouter'] },
+        typo: { agent: 'senpi', family: 'x', quota: 'openroutr' },
+      },
+      categories: { quick: ['or-qwen'] },
+    },
+    AGENTS,
+  )
+
+  test('a string is the command; the provider joins the built-in ones', () => {
+    expect(OWN.quota.providers.openrouter).toEqual({ command: '~/q/openrouter.sh' })
+    expect(OWN.quota.providers.claude).toEqual({ enabled: true })
+    expect(providersOf(OWN)).toEqual(['claude', 'opencode-go', 'openrouter'])
+    expect(providerOf(OWN.profiles['or-qwen']!)).toBe('openrouter')
+    expect(configProblems(OWN)).toEqual([`profile 'typo' bills quota 'openroutr', which is neither built in nor given a "command" under quota.providers`])
+  })
+
+  test('the command prints a percent, or windows by name', () => {
+    expect(parseCommandQuota('42\n').windows).toEqual([{ name: 'usage', usedPercent: 42, resetsAt: null, scope: null }])
+    expect(parseCommandQuota('{"daily": 42.5, "weekly": 9, "note": "x"}').windows.map(w => `${w.name}=${w.usedPercent}`)).toEqual(['daily=42.5', 'weekly=9'])
+    expect(() => parseCommandQuota('{}')).toThrow()
+    expect(() => parseCommandQuota('"lots"')).toThrow()
+    expect(() => parseCommandQuota('not json')).toThrow()
+  })
+
+  test('routing skips a profile whose command reports it over the threshold', () => {
+    const now = Date.now()
+    const snap = (pct: number): Record<string, OmhQuota> => ({
+      openrouter: { provider: 'openrouter', checkedAt: now, windows: [{ name: 'daily', usedPercent: pct, resetsAt: null, scope: null }], limitReached: false, error: null, source: 'command' },
+    })
+    expect(quotaAllows(OWN, snap(40), 'or-qwen')).toBe(true)
+    expect(quotaAllows(OWN, snap(95), 'or-qwen')).toBe('openrouter quota exhausted: daily 95% (resets ?)')
+    expect(formatQuota(OWN, snap(40))).toContain('| openrouter | ✅ ok | daily 40% | command |')
+  })
+
+  test('probe runs the command with sh -c; a failure is unknown with its reason', async () => {
+    const ran: string[][] = []
+    const engine = (exitCode: number, stdout: string, stderr = '') =>
+      ({ clock: { now: async () => 1 }, process: { run: async (argv: string[]) => (ran.push(argv), { exitCode, stdout, stderr }) } }) as never
+    const ok = await probe(engine(0, '{"daily": 12}'), 'openrouter', '~/q/openrouter.sh')
+    expect(ran[0]).toEqual(['sh', '-c', '~/q/openrouter.sh'])
+    expect(ok.error).toBe(null)
+    expect(ok.windows[0]!.usedPercent).toBe(12)
+    expect((await probe(engine(2, '', 'no API key\nmore'), 'openrouter', 'x')).error).toBe('command exited 2: no API key')
+    expect((await probe(engine(0, 'hello'), 'openrouter', 'x')).error).toContain('command printed no usage')
+    expect((await probe(engine(0, '1'), 'nameless')).error).toBe(`no "command" for 'nameless' under quota.providers`)
+  })
+})
+
 describe('markdown answers', () => {
   test('cells never break a row', () => {
     expect(cell('a | b\nc')).toBe('a \\| b c')
@@ -511,6 +565,16 @@ describe('subagent workers', () => {
     expect(isSubagentProfile(SUB_CFG, 'go-fast')).toBe(false)
     expect(providerOf(SUB_CFG.profiles['sub-explore']!)).toBe('claude')
     expect(configProblems(SUB_CFG)).toEqual([])
+  })
+
+  test("a subagent's model meets its per-model window", () => {
+    const now = Date.now()
+    const q: Record<string, OmhQuota> = {
+      claude: { provider: 'claude', checkedAt: now, windows: [{ name: '5h', usedPercent: 10, resetsAt: null, scope: null }, { name: '7d-opus', usedPercent: 99, resetsAt: null, scope: 'opus' }], limitReached: false, error: null, source: 'x' },
+    }
+    const cfg = normalizeConfig('/c.json', { profiles: { 'sub-review': { agent: 'subagent', family: 'claude', model: 'opus' }, 'sub-haiku': { agent: 'subagent', family: 'claude', model: 'haiku' } } }, { subagent: { launch: 'subagent' } })
+    expect(quotaAllows(cfg, q, 'sub-review')).toContain('7d-opus 99%')
+    expect(quotaAllows(cfg, q, 'sub-haiku')).toBe(true)
   })
 
   test('routing takes a subagent first, and skips it when Claude is out of quota', () => {

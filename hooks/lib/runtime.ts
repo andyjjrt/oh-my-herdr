@@ -12,7 +12,7 @@ import { diagnose, excerpt } from './diagnose'
 import { appendLine, currentRunId, hasText, listWorkers, Paths, readGates, readJson, remove, type Closing, type DispatchFile, writeJson } from './files'
 import { agentStatus, notify, readScreen } from './herdr'
 import { type Plan, parsePlan, runView, SCOUT_RUN, statusFile, type TaskFacts } from './plan'
-import { PROVIDERS, probe, providerOf, quotaAllows, type Provider } from './quota'
+import { probe, providerOf, providersOf, quotaAllows, type Provider } from './quota'
 import { ACTIVE, newWorker, type SettleEffect, type SettleEvent, step } from './settle'
 import { endStatusOf, isSubagentPane, isSubagentWorker, settleStatusOf, subagentIdOf, subagentScreen } from './subagent'
 import { type Display, displayOf } from './statusbar'
@@ -505,9 +505,10 @@ export function stopWatcher(name: string): void {
 
 // ------------------------------------------------------------------ quota
 
-export async function refreshQuota(providers: readonly Provider[] = PROVIDERS, force = false): Promise<Record<string, OmhQuota>> {
+export async function refreshQuota(only?: readonly Provider[], force = false): Promise<Record<string, OmhQuota>> {
   const $ = host()
   const cfg = rt.cfg
+  const providers = only ?? providersOf(cfg)
   const cached = await $.state.quota.get()
   const now = await $.clock.now()
   const ttl = (cfg?.quota.cacheSeconds ?? 120) * 1000
@@ -517,7 +518,7 @@ export async function refreshQuota(providers: readonly Provider[] = PROVIDERS, f
       if (cfg?.quota.providers[p]?.enabled === false) return
       const q = cached[p]
       if (!force && q && now - q.checkedAt < ttl) return
-      fresh[p] = await probe($, p)
+      fresh[p] = await probe($, p, cfg?.quota.providers[p]?.command)
     }),
   )
   if (Object.keys(fresh).length === 0) return cached

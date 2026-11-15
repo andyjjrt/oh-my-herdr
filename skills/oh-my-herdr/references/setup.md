@@ -108,12 +108,30 @@ Shape:
   "threshold": 95,          // a usage window at/above this % counts as exhausted
   "cache_seconds": 120,     // how long a reading is reused
   "on_unknown": "allow",    // or "block": a failed check counts as exhausted
-  "providers": { "opencode-go": { "enabled": false } }   // turn one provider's check off
+  "providers": {
+    "opencode-go": { "enabled": false },                    // turn one provider's check off
+    "openrouter": "~/.config/oh-my-herdr/quota/openrouter.sh" // a provider of your own: a command
+  }
 }
 ```
 The mod reads usage straight from each provider's API: Claude from the Claude Code login
 (`~/.claude/.credentials.json`, or `CLAUDE_CODE_OAUTH_TOKEN`), OpenCode Go from
 `OPENCODE_GO_API_KEY` / `OPENCODE_API_KEY` or senpi's `auth.json`.
+
+**Any other provider** is a shell command (run with `sh -c`, 15 s at most) that prints the percent
+used, either one number or one per window:
+
+```sh
+#!/bin/sh
+# ~/.config/oh-my-herdr/quota/openrouter.sh: credits used, as a percent (the key stays in this script's world)
+curl -fsS -H "Authorization: Bearer $OPENROUTER_API_KEY" https://openrouter.ai/api/v1/credits |
+  jq '.data | {credits: (100 * .total_usage / .total_credits)}'
+```
+
+`42` and `{"daily": 42, "weekly": 9}` both work. A window at the threshold or above counts as
+exhausted; a non-zero exit or output that is not usage counts as unknown (`on_unknown` decides),
+with the first stderr line as the reason. A profile bills such a provider only when it names it:
+`"quota": "openrouter"`. `/omh check` flags a profile naming a provider that has no command.
 
 Run `/omh check` after editing; it flags undefined profiles and missing executables and shows which
 provider every profile maps to. `/omh quota` shows current usage.
