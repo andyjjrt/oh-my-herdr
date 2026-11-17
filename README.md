@@ -40,7 +40,7 @@ subscription's quota; fix anything it flags.
 /ulw paginate the orders API and add tests
 ```
 
-The lead explores and drafts a plan, then stops for you: read `.omh/plan.md` (`/omh plan` shows it
+The lead explores and drafts a plan, then stops for you: read `.omh/runs/<run>/draft.md` (`/omh plan` shows it
 beside the lead) and approve it with `/omh approve`. From there it dispatches wave after wave, and
 is woken whenever a wave finishes or a worker gets stuck.
 
@@ -61,8 +61,8 @@ senpi                            # then /login → OpenCode Go
 | `/ulw <goal>` | Start a run: explore → plan → approve → waves → verify → gate |
 | `/omh check` | The config in effect, the agents it needs, quota per profile |
 | `/omh status` | The current run, short; `/omh status full` lists every task and worker |
-| `/omh plan` | Preview `.omh/plan.md` beside the lead; again to close |
-| `/omh approve` | Approve plan.md so the lead can split it into waves |
+| `/omh plan` | Preview the current run's plan beside the lead; again to close |
+| `/omh approve` | Approve the draft (it becomes the run's plan.md) so the lead can split it into waves |
 | `/omh board` | Toggle the board pane: every wave, task, worker and quota |
 | `/omh quota` | Each subscription's usage now |
 | `/omh teardown` | Close every worker |
@@ -99,6 +99,7 @@ loads the same workflow.
 | [Status line](docs/status-line.md) | Where progress shows, and adding it to your own status line |
 | [Architecture](docs/architecture.md) | The pieces, one run, the worker state machine, guards, `.omh/` |
 | [Setup reference](skills/oh-my-herdr/references/setup.md) | herdr and senpi setup in detail (also what the lead reads) |
+| [Changelog](CHANGELOG.md) | What changed in each version |
 | [The lead's workflow](skills/oh-my-herdr/SKILL.md) | The skill the lead follows; brief templates in [roles.md](skills/oh-my-herdr/references/roles.md) |
 
 The bundled `herdr` skill is herdr's own guide to panes, tabs, workspaces and agents, copied

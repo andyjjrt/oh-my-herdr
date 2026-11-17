@@ -9,9 +9,9 @@ import type { Engine } from './engine'
 import type { OmhDiagnosis, OmhQuota, OmhRunView, OmhWorker } from '../../types'
 import { type Config, loadConfig } from './config'
 import { diagnose, excerpt } from './diagnose'
-import { appendLine, currentRunId, hasText, listWorkers, Paths, readGates, readJson, remove, type Closing, type DispatchFile, writeJson } from './files'
+import { appendLine, currentRunId, hasText, openRunId, listWorkers, Paths, readGates, readJson, remove, type Closing, type DispatchFile, writeJson } from './files'
 import { agentStatus, notify, readScreen } from './herdr'
-import { type Plan, parsePlan, runView, SCOUT_RUN, statusFile, type TaskFacts } from './plan'
+import { type OmhStatusFile, type Plan, parsePlan, planningStatusFile, runView, SCOUT_RUN, statusFile, type TaskFacts } from './plan'
 import { probe, providerOf, providersOf, quotaAllows, type Provider } from './quota'
 import { ACTIVE, newWorker, type SettleEffect, type SettleEvent, step } from './settle'
 import { endStatusOf, isSubagentPane, isSubagentWorker, settleStatusOf, subagentIdOf, subagentScreen } from './subagent'
@@ -284,15 +284,10 @@ export async function refreshRun(): Promise<OmhRunView | null> {
   const $ = host()
   const p = paths()
   const id = await currentRunId($, p)
-  if (id === null) {
+  const plan = id === null ? null : await loadPlan(id)
+  if (id === null || plan === null) {
     await $.state.run.set(() => null)
-    await publishStatus(null)
-    return null
-  }
-  const plan = await loadPlan(id)
-  if (plan === null) {
-    await $.state.run.set(() => null)
-    await publishStatus(null)
+    await publishStatus(null, await planningStatus())
     return null
   }
   const gates = await readGates($, p, id)
@@ -323,10 +318,23 @@ export async function refreshRun(): Promise<OmhRunView | null> {
   return view
 }
 
-/** Write .omh/status.json for a custom status line, or remove it when there is nothing to show. */
-async function publishStatus(view: OmhRunView | null): Promise<void> {
+/** The status file of a current run with no plan.json yet: its plan drafted, or approved; null when there is none. */
+async function planningStatus(): Promise<OmhStatusFile | null> {
   const $ = host()
-  const file = view === null ? null : statusFile(view, new Date())
+  const p = paths()
+  const run = await openRunId($, p)
+  if (run === null) return null
+  const drafting = await hasText($, p.draft(run))
+  if (!drafting && !(await hasText($, p.planMd(run)))) return null
+  const text = drafting ? await $.fs.read(p.draft(run)) : await $.fs.read(p.planMd(run))
+  const goal = text.trim().split('\n').find(l => l.trim() !== '')?.replace(/^#+\s*/, '') ?? run
+  return planningStatusFile(run, goal, drafting ? 'draft' : 'approved', new Date(await $.clock.now()))
+}
+
+/** Write .omh/status.json for a custom status line, or remove it when there is nothing to show. */
+async function publishStatus(view: OmhRunView | null, planning: OmhStatusFile | null = null): Promise<void> {
+  const $ = host()
+  const file = view === null ? planning : statusFile(view, new Date())
   try {
     if (file === null) await remove($, paths().status)
     else await writeJson($, paths().status, file)

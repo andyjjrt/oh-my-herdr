@@ -34,6 +34,10 @@ workers finishing while the lead is idle wouldn't show.
   you), or nothing when no run is open. It reads the nearest `.omh/status.json` at or above `dir`.
   `--field <name>` prints one field; `--json` the whole file. It always exits 0.
 - `.omh/status.json` fields: `version` (1), `run`, `goal`, `wave`, `waves`, `done`, `total`,
-  `alerts`, `wave_done`, `wave_total`, `line`, `updated_at`. `done`/`total`/`alerts` count the whole
-  run (done = reported or closed); `wave_done`/`wave_total` the current wave. The mod rewrites it
-  whenever the run changes and removes it once every gate has passed. Fields are only ever added.
+  `alerts`, `wave_done`, `wave_total`, `line`, `updated_at`, `stage`. `done`/`total`/`alerts` count
+  the whole run (done = its wave's gate has passed, so a run waiting on its last gate shows 4/5,
+  not 5/5); `wave_done`/`wave_total` the current wave (done = reported or closed). `stage` is
+  `draft` while the plan waits for `/omh approve` (`line` is `✎ plan draft`), `approved` until the
+  waves are saved (`✓ plan approved`), then `running`; the counts are 0 before `running`. The mod
+  rewrites it whenever the run changes and removes it once every gate has passed. Fields are only
+  ever added.

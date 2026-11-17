@@ -20,7 +20,7 @@ flowchart TB
     sub -->|turn.complete| mod
   end
   subgraph herdr["herdr"]
-    panes["Pane workers<br/>claude · senpi · …<br/>omh-workers tabs"]
+    panes["Pane workers<br/>claude · pi · senpi · …<br/>omh-workers tabs"]
   end
   mod -->|herdr agent start / prompt| panes
   panes -->|status events<br/>omh-watch.py| mod
@@ -56,7 +56,7 @@ sequenceDiagram
   Note over L: ends its turn
   W-->>M: result.md, status
   M->>L: wake: scouts are back
-  L->>M: omh_status draft (plan.md)
+  L->>M: omh_status draft (runs/<run>/draft.md)
   L-->>U: summary, then waits
   U->>M: /omh approve
   M->>L: wake: derive the waves
@@ -123,8 +123,10 @@ stateDiagram-v2
 
 - **File ownership.** While a task runs, the files it `owns` are refused to every other writer
   (Edit, Write, NotebookEdit): the lead, and other subagents. The subagent that owns them may write.
-- **Plan approval.** `omh_status plan` is refused until you approve plan.md with `/omh approve`;
-  a changed plan.md needs approving again.
+- **Plan approval.** `omh_status plan` is refused until you approve the run's draft with
+  `/omh approve`, which renames it to `plan.md`; a changed plan.md needs approving again. Each piece
+  of work gets its own run directory when it is first drafted (`omh_status draft` with a `name`), so
+  a new plan can never be saved into an old run.
 - **Gates.** A wave cannot be dispatched until every earlier wave's gate is marked passed.
 
 ## `.omh/`
@@ -132,14 +134,16 @@ stateDiagram-v2
 ```text
 .omh/
 ├── config.json                  optional, per project
-├── current-run                  id of the run the mod follows
-├── plan.md · plan.approved      the plan in prose, and the digest you approved
+├── current-run                  id of the run the mod follows (set at its first draft)
 ├── status.json                  progress for a custom status line
 ├── tab.json                     the omh-workers tabs
 ├── agents/<worker>.json         one worker: pane or agent:<id>, profile, task
 └── runs/
-    ├── <run>/
-    │   ├── plan.md · plan.json · gates.json
+    ├── <date>-<name>/
+    │   ├── draft.md                 the plan being drafted, until /omh approve
+    │   ├── plan.md · plan.approved  the approved plan, and its digest
+    │   ├── plan.v<n>.md             earlier approved plans, after a replan
+    │   ├── plan.json · gates.json
     │   └── <task>/brief.md · result.md · dispatch.json · verified.json | abandoned.json
     └── _scout/<scout>/          scouts: same files, plus collected.json
 ```

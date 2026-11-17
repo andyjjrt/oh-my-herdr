@@ -9,6 +9,7 @@
     "                         \"subagent_type\" pick it; its final reply is saved as result.md. Shares the lead's Claude quota."
   ],
   "claude":   { "launch": "herdr-kind", "kind": "claude",   "bin": "claude" },
+  "pi":       { "launch": "herdr-kind", "kind": "pi",       "bin": "pi" },
   "senpi":    { "launch": "command",    "command": ["senpi"], "detect_as": "pi", "bin": "senpi" },
   "subagent": { "launch": "subagent" }
 }

@@ -68,7 +68,7 @@ export function parsePlan(raw: unknown, categories: readonly string[]): { plan: 
       const intent = t.intent as Intent
       if (!INTENTS.includes(intent)) errors.push(`task ${tid}: "intent" must be one of ${INTENTS.join(', ')}`)
       const category = typeof t.category === 'string' ? t.category : ''
-      if (!categories.includes(category)) errors.push(`task ${tid}: unknown category '${category}' (known: ${categories.join(', ')})`)
+      if (!categories.includes(category)) errors.push(`task ${tid}: ${unknownCategory(category, categories)}`)
       tasks.push({
         id: tid,
         title: typeof t.title === 'string' && t.title.trim() ? t.title.trim() : tid,
@@ -178,14 +178,16 @@ export function waveProgress(run: OmhRunView): { wave: number; done: number; tot
 }
 
 /**
- * The status line's numbers for a whole run: tasks reported or closed, of all, and how many need
- * the user. null once every gate has passed (nothing left to show) or when the plan is empty.
+ * The status line's numbers for a whole run: tasks done, of all, and how many need the user. A task
+ * is done once its wave's gate has passed, so the bar fills only as work is accepted (a run whose
+ * last gate is still open shows 4/5, not 5/5). null once every gate has passed (nothing left to
+ * show) or when the plan is empty.
  */
 export function runProgress(run: OmhRunView): { done: number; total: number; alerts: number } | null {
   if (run.current === null) return null
   const tasks = run.waves.flatMap(w => w.tasks)
   if (tasks.length === 0) return null
-  const done = tasks.filter(t => t.status === 'reported' || DONE.has(t.status)).length
+  const done = run.waves.filter(w => w.gatePassed).reduce((n, w) => n + w.tasks.length, 0)
   const alerts = tasks.filter(t => t.status === 'blocked' || t.status === 'alert').length
   return { done, total: tasks.length, alerts }
 }
@@ -201,16 +203,37 @@ export type OmhStatusFile = {
   /** The current wave (1-based) and how many waves there are. */
   wave: number
   waves: number
-  /** Over the whole run: tasks reported or closed, of all; and how many need the user. */
+  /** Over the whole run: tasks done (their wave's gate passed), of all; and how many need the user. */
   done: number
   total: number
   alerts: number
-  /** The same for the current wave. */
+  /** The current wave: its tasks reported or closed, of all. */
   wave_done: number
   wave_total: number
   /** Ready to print: ██░░░░ 2/5, then ⚠1 while a task needs the user. */
   line: string
   updated_at: string
+  /** Where the run is: its plan being drafted, approved but not yet split into waves, or running. */
+  stage?: 'draft' | 'approved' | 'running'
+}
+
+/** The status file while a run has no waves yet: its plan is a draft, or approved and waiting for plan.json. */
+export function planningStatusFile(run: string, goal: string, stage: 'draft' | 'approved', now: Date): OmhStatusFile {
+  return {
+    version: 1,
+    run,
+    goal,
+    wave: 0,
+    waves: 0,
+    done: 0,
+    total: 0,
+    alerts: 0,
+    wave_done: 0,
+    wave_total: 0,
+    line: stage === 'draft' ? '✎ plan draft' : '✓ plan approved',
+    updated_at: now.toISOString(),
+    stage,
+  }
 }
 
 /** The status file for a run, or null when there is nothing to show (no run, or every gate passed). */
@@ -234,6 +257,7 @@ export function statusFile(run: OmhRunView, now: Date): OmhStatusFile | null {
     wave_total: wave.total,
     line: `${bar} ${all.done}/${all.total}${all.alerts > 0 ? ` ⚠${all.alerts}` : ''}`,
     updated_at: now.toISOString(),
+    stage: 'running',
   }
 }
 
@@ -255,4 +279,49 @@ export function draftDigest(text: string): string {
 /** Whether the user approved exactly this plan.md. */
 export function isApproved(draft: string | null, approved: string | null): boolean {
   return draft !== null && draft.trim() !== '' && approved !== null && approved.trim() === draftDigest(draft)
+}
+
+// ------------------------------------------------------------------ runs and categories by name
+
+/**
+ * The run id a draft's name gives: `YYYYMMDD-<slug>`, the date of `now` (local) and the name made a
+ * slug (lowercase ASCII letters, digits and dashes, at most 40). A name that already starts with
+ * such a date is kept as it is, so the lead can name an existing run. Null when nothing is left.
+ */
+export function planRunId(name: string, now: Date): string | null {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '')
+  if (slug === '') return null
+  if (/^\d{8}-./.test(slug)) return slug
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${slug}`
+}
+
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i)
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i]
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1))
+    prev = cur
+  }
+  return prev[b.length]!
+}
+
+/** The known name closest to a mistyped one (a prefix either way, or at most two edits off); null when none is. */
+export function closestName(name: string, known: readonly string[]): string | null {
+  const n = name.toLowerCase()
+  let best: { name: string; d: number } | null = null
+  for (const k of known) {
+    const kl = k.toLowerCase()
+    const d = n.length >= 3 && (kl.startsWith(n) || n.startsWith(kl)) ? 0.5 : editDistance(n, kl)
+    if (d <= 2 && (best === null || d < best.d)) best = { name: k, d }
+  }
+  return best?.name ?? null
+}
+
+/** "unknown category 'review' — did you mean 'reviewer'? (known: …)". A category is not an intent. */
+export function unknownCategory(category: string, known: readonly string[]): string {
+  const near = closestName(category, known)
+  const hint = near !== null ? ` — did you mean '${near}'?` : ''
+  const intent = (INTENTS as readonly string[]).includes(category) ? ` '${category}' is an intent; the category is a routing name from the config.` : ''
+  return `unknown category '${category}'${hint}${intent} (known: ${known.join(', ')})`
 }

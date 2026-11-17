@@ -5,6 +5,7 @@
 // family is not avoided (soft rule: falls back with a warning).
 
 import type { Config } from './config'
+import { unknownCategory } from './plan'
 
 export type Intent = 'explore' | 'research' | 'implement' | 'fix' | 'review' | 'plan' | 'write'
 
@@ -44,7 +45,7 @@ export function pickProfile(
 ): RouteResult {
   const cat = cfg.categories[category]
   if (!cat) {
-    return { ok: false, error: `unknown category '${category}' (known: ${Object.keys(cfg.categories).join(', ')})`, skipped: [] }
+    return { ok: false, error: unknownCategory(category, Object.keys(cfg.categories)), skipped: [] }
   }
   const warnings: string[] = []
   const skipped: string[] = []

@@ -5,10 +5,10 @@
 import type { OmhWorker } from '../../types'
 import { configProblems, isSubagentProfile, type Config } from './config'
 import { diagnose, excerpt } from './diagnose'
-import { currentRunId, hasText, listWorkers, readGates, readJson, remove, writeJson, type Closing, type DispatchFile, type WorkerFile } from './files'
+import { currentRunId, hasText, openRunId, listWorkers, readGates, readJson, remove, writeJson, type Closing, type DispatchFile, type WorkerFile } from './files'
 import { agentStatus, closePane, createTab, herdr, HerdrError, paneExists, paneHome, readScreen, shellQuote, splitPane, tabPanes } from './herdr'
 import { place, type TabSlot } from './layout'
-import { DONE, draftDigest, findTask, isApproved, isScout, parsePlan, SCOUT_ID, SCOUT_INTENTS, SCOUT_RUN, TASK_ID } from './plan'
+import { DONE, draftDigest, findTask, isApproved, isScout, parsePlan, planRunId, SCOUT_ID, SCOUT_INTENTS, SCOUT_RUN, TASK_ID, unknownCategory } from './plan'
 import { code, table } from './md'
 import { formatQuota, providerOf, quotaAllows } from './quota'
 import { INTENTS, isUsualPair, pickProfile, type Intent } from './route'
@@ -311,7 +311,7 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
   }
 
   const category = a.category ?? task.category
-  if (!cfg.categories[category]) return fail(`unknown category '${category}' (known: ${Object.keys(cfg.categories).join(', ')})`)
+  if (!cfg.categories[category]) return fail(unknownCategory(category, Object.keys(cfg.categories)))
   const warnings: string[] = []
   if (!scout && category !== task.category) warnings.push(`category ${category} differs from the plan's ${task.category}`)
   if (!isUsualPair(intent, category)) warnings.push(`intent ${intent} with category ${category} is unusual; rationale recorded`)
@@ -533,32 +533,84 @@ async function readText($: ReturnType<typeof host>, path: string): Promise<strin
   }
 }
 
-/** Step one of planning: the plan in prose, for the user to read and approve before any wave exists. */
-export async function draftPlan(markdown: string): Promise<Answer> {
+/**
+ * Step one of planning: the plan in prose, for the user to read and approve before any wave exists.
+ * With `name` it starts a run (.omh/runs/<date>-<name>/draft.md) and makes it current; without, it
+ * revises the current run's plan. A new run is never the default, so new work cannot land in an old run.
+ */
+export async function draftPlan(markdown: string, name?: string): Promise<Answer> {
   const $ = host()
   const p = paths()
   if (!markdown.trim()) return fail('draft needs "markdown": the plan as markdown (goal, findings, approach, tasks with acceptance checks, risks, open questions)')
-  await $.fs.write(p.draft, `${markdown.trim()}\n`)
-  await remove($, p.approval)
+  const current = await openRunId($, p)
+  let run: string
+  if (name !== undefined) {
+    const id = planRunId(name, new Date(await $.clock.now()))
+    if (id === null) return fail(`bad name '${name}': give a short slug for the work, like "model-groups"`)
+    if (id !== current) {
+      if (await $.fs.exists(p.run(id))) {
+        return fail(`run ${id} already exists. Pick another name for new work, or leave "name" out to revise the current run${current !== null ? ` (${current})` : ''}.`)
+      }
+      if (current !== null) {
+        const busy = Object.values(await workers()).filter(w => w.run === current && ACTIVE.has(w.phase))
+        if (busy.length > 0) {
+          return fail(
+            `run ${current} still has work out (${busy.map(w => `${w.name}: ${w.task} ${w.phase}`).join(', ')}). Wait for it and close those tasks, or omh_teardown the workers, before starting run ${id}; to change this run's plan instead, leave "name" out.`,
+          )
+        }
+      }
+    }
+    run = id
+  } else {
+    if (current === null) return fail('the first draft of a piece of work needs "name": a short slug for it (the run becomes .omh/runs/<date>-<name>/)')
+    run = current
+  }
+  await $.fs.write(p.draft(run), `${markdown.trim()}\n`)
+  await $.fs.write(p.currentRun, `${run}\n`)
+  await refreshRun()
   const lines = markdown.trim().split('\n').length
   return ok(
     [
-      `plan.md written: ${p.draft} (${lines} lines). It is not approved yet.`,
+      `draft written for run ${run}: ${p.draft(run)} (${lines} lines). It is not approved yet.`,
       'Now give the user a short summary (goal, the tasks, anything you need them to decide) and the path, tell them `/omh plan` previews it in a pane beside you, then END YOUR TURN.',
-      'Do not write plan.json or dispatch anything: the user reads or edits plan.md and approves it with /omh approve, which wakes you to derive the waves. If they ask for changes, draft again.',
+      'Do not write plan.json or dispatch anything: the user reads or edits the draft and approves it with /omh approve, which makes it the run\'s plan.md and wakes you to derive the waves. If they ask for changes, draft again (leave "name" out).',
     ].join('\n'),
   )
 }
 
-/** /omh approve: the user approves plan.md as it is now. */
-export async function approvePlan(): Promise<Answer> {
+/**
+ * /omh approve: the current run's draft.md, as it is now, becomes its plan.md (an earlier plan.md is
+ * kept as plan.v<n>.md). With no draft, it approves plan.md again, as after editing it by hand.
+ */
+export async function approvePlan(): Promise<Answer & { file?: string }> {
   const $ = host()
   const p = paths()
-  const draft = await readText($, p.draft)
-  if (draft === null || draft.trim() === '') return fail(`no plan.md to approve (${p.draft}); ask the lead to draft one first`)
-  await $.fs.write(p.approval, `${draftDigest(draft)}\n`)
-  const title = draft.trim().split('\n').find(l => l.trim() !== '')?.replace(/^#+\s*/, '') ?? 'plan'
-  return ok(`approved plan.md: ${title}`)
+  const run = await openRunId($, p)
+  if (run === null) {
+    const legacy = (await hasText($, p.legacyDraft)) ? ` (${p.legacyDraft} is from an older oh-my-herdr: ask the lead to draft it again with a "name")` : ''
+    return fail(`no plan to approve${legacy}; ask the lead to draft one first`)
+  }
+  const draft = await readText($, p.draft(run))
+  const current = await readText($, p.planMd(run))
+  let text: string
+  if (draft !== null && draft.trim() !== '') {
+    if (current !== null && current.trim() !== '' && current.trim() !== draft.trim()) {
+      let n = 1
+      while (await $.fs.exists(p.planVersion(run, n))) n++
+      await $.fs.write(p.planVersion(run, n), current)
+    }
+    await $.fs.write(p.planMd(run), draft)
+    await remove($, p.draft(run))
+    text = draft
+  } else if (current !== null && current.trim() !== '') {
+    text = current
+  } else {
+    return fail(`run ${run} has no draft to approve (${p.draft(run)}); ask the lead to draft one first`)
+  }
+  await $.fs.write(p.approval(run), `${draftDigest(text)}\n`)
+  await refreshRun()
+  const title = text.trim().split('\n').find(l => l.trim() !== '')?.replace(/^#+\s*/, '') ?? 'plan'
+  return { ...ok(`approved plan.md of run ${run}: ${title}`), file: p.planMd(run) }
 }
 
 /** The shell line that shows plan.md: the first of leaf (live reload), glow, bat, less that is installed. */
@@ -572,13 +624,16 @@ export function planViewerLine(file: string): string {
   ].join('; ')
 }
 
-/** The plan.md to show: the draft, else the approved plan.md of the current run; null when neither has text. */
+/** The plan to show: the current run's draft, else its plan.md, else a pre-0.4 .omh/plan.md; null when none has text. */
 export async function planFile(): Promise<string | null> {
   const $ = host()
   const p = paths()
-  if (await hasText($, p.draft)) return p.draft
-  const run = await currentRunId($, p)
-  return run !== null && (await hasText($, p.planMd(run))) ? p.planMd(run) : null
+  const run = await openRunId($, p)
+  if (run !== null) {
+    if (await hasText($, p.draft(run))) return p.draft(run)
+    if (await hasText($, p.planMd(run))) return p.planMd(run)
+  }
+  return (await hasText($, p.legacyDraft)) ? p.legacyDraft : null
 }
 
 /** /omh plan without prismantis: open plan.md in a herdr pane beside the lead, or close that pane if it is open. */
@@ -592,7 +647,7 @@ export async function togglePlanView(): Promise<Answer> {
     return ok('plan preview closed')
   }
   const file = await planFile()
-  if (file === null) return fail(`no plan.md yet (${p.draft}); the lead writes it with omh_status action "draft"`)
+  if (file === null) return fail('no plan yet; the lead writes it with omh_status action "draft"')
   if (rt.selfPane === null) return fail('cannot tell which herdr pane is the lead (HERDR_PANE_ID is not set)')
   try {
     const pane = await splitPane($, rt.selfPane, 'right', p.root)
@@ -604,42 +659,37 @@ export async function togglePlanView(): Promise<Answer> {
   }
 }
 
-export async function writePlan(raw: unknown, newRun: boolean): Promise<Answer> {
+export async function writePlan(raw: unknown): Promise<Answer> {
   const $ = host()
   const p = paths()
-  // Waves come from an approved plan.md, never straight from exploring.
-  const draft = await readText($, p.draft)
-  if (draft === null || draft.trim() === '') {
-    return fail('no plan.md yet. First write the plan in prose with omh_status action "draft" (markdown), show the user a summary, and end your turn until they approve it with /omh approve.')
+  // Waves come from the current run's approved plan.md, never straight from exploring.
+  const run = await openRunId($, p)
+  if (run === null) {
+    return fail('no plan yet. First write the plan in prose with omh_status action "draft" (markdown, and a "name" for the work), show the user a summary, and end your turn until they approve it with /omh approve.')
   }
-  if (!isApproved(draft, await readText($, p.approval))) {
-    return fail(`plan.md (${p.draft}) is not approved, or changed after it was approved. Ask the user to read it and run /omh approve, then end your turn. Do not dispatch anything until then.`)
+  if (await hasText($, p.draft(run))) {
+    return fail(`run ${run} has a draft waiting for approval (${p.draft(run)}). Ask the user to read it and run /omh approve, then end your turn. Do not dispatch anything until then.`)
+  }
+  const md = await readText($, p.planMd(run))
+  if (md === null || md.trim() === '') {
+    return fail(`run ${run} has no plan.md yet. Draft it with omh_status action "draft", and end your turn until the user approves it.`)
+  }
+  if (!isApproved(md, await readText($, p.approval(run)))) {
+    return fail(`${p.planMd(run)} changed after it was approved. Ask the user to read it and run /omh approve, then end your turn. Do not dispatch anything until then.`)
   }
   const cfg = await config()
   const parsed = parsePlan(raw, Object.keys(cfg.categories))
-  if ('errors' in parsed) return fail(`plan rejected:\n- ${parsed.errors.join('\n- ')}`)
-  let run = await currentRunId($, p)
-  if (run !== null && !newRun) {
-    // Replanning keeps tasks already out: they must stay in the plan.
-    const old = await loadPlan(run)
-    for (const w of old?.waves ?? []) {
-      for (const t of w.tasks) {
-        if ((await $.fs.exists(p.dispatch(run, t.id))) && !findTask(parsed.plan, t.id)) {
-          return fail(`task ${t.id} was already dispatched in run ${run}; keep it in the plan, or pass new_run: true to start a new run`)
-        }
+  if ('errors' in parsed) return fail(`plan rejected (the approval still stands: fix these and call again):\n- ${parsed.errors.join('\n- ')}`)
+  // Replanning keeps tasks already out: they must stay in the plan.
+  const old = await loadPlan(run)
+  for (const w of old?.waves ?? []) {
+    for (const t of w.tasks) {
+      if ((await $.fs.exists(p.dispatch(run, t.id))) && !findTask(parsed.plan, t.id)) {
+        return fail(`task ${t.id} was already dispatched in run ${run}; keep it in the plan (for different work, draft a new run with a "name")`)
       }
     }
-  } else {
-    const d = new Date(await $.clock.now())
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const slug = parsed.plan.goal.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'run'
-    run = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}-${slug}`
   }
   await writeJson($, p.plan(run), parsed.plan)
-  await $.fs.write(p.planMd(run), draft)
-  await $.fs.write(p.currentRun, `${run}\n`)
-  // One approval, one plan.json: a later replan needs plan.md approved again.
-  await remove($, p.approval)
   const view = await refreshRun()
   return ok(`plan saved for run ${run} (${parsed.plan.waves.length} wave(s), ${parsed.plan.waves.reduce((n, w) => n + w.tasks.length, 0)} task(s)). Current wave: ${view?.current ?? 'none'}. Dispatch its tasks with omh_dispatch.`)
 }

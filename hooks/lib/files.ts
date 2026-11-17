@@ -2,12 +2,13 @@
 //
 //   .omh/agents/<name>.json            one worker: pane, profile, family, agent, task, run
 //   .omh/tab.json                      { tabs: [...] } the omh-workers tabs and their root panes
-//   .omh/current-run                   id of the run the mod follows
+//   .omh/current-run                   id of the run the mod follows (set when its first draft is written)
 //   .omh/status.json                   the current run's progress, for a custom status line (statusline/)
-//   .omh/plan.md                       the plan in prose the lead drafts and the user approves
-//   .omh/plan.approved                 digest of the plan.md the user approved (/omh approve)
 //   .omh/plan-view.json                { pane } of the herdr pane /omh plan opened to preview plan.md
-//   .omh/runs/<run>/plan.md            the approved plan.md the run's plan.json was derived from
+//   .omh/runs/<run>/draft.md           the plan in prose the lead drafts, until the user approves it
+//   .omh/runs/<run>/plan.md            the approved plan (/omh approve renames draft.md to it)
+//   .omh/runs/<run>/plan.v<n>.md       earlier approved plans, kept when a replan is approved
+//   .omh/runs/<run>/plan.approved      digest of the plan.md the user approved
 //   .omh/runs/<run>/plan.json          the plan (hooks/lib/plan.ts)
 //   .omh/runs/<run>/gates.json         { "passed": [1, 2] }
 //   .omh/runs/<run>/<task>/brief.md    what the worker was told
@@ -85,12 +86,21 @@ export class Paths {
   planMd(run: string) {
     return `${this.run(run)}/plan.md`
   }
-  /** The plan.md being drafted, before it belongs to a run. */
-  get draft() {
-    return `${this.omh}/plan.md`
+  /** The plan being drafted for a run, until /omh approve makes it the run's plan.md. */
+  draft(run: string) {
+    return `${this.run(run)}/draft.md`
   }
-  get approval() {
-    return `${this.omh}/plan.approved`
+  /** Digest of the run's plan.md as the user approved it. */
+  approval(run: string) {
+    return `${this.run(run)}/plan.approved`
+  }
+  /** An earlier approved plan.md, kept when a replan is approved over it. */
+  planVersion(run: string, n: number) {
+    return `${this.run(run)}/plan.v${n}.md`
+  }
+  /** Where plans were drafted before they lived in a run's directory (oh-my-herdr 0.3 and older). */
+  get legacyDraft() {
+    return `${this.omh}/plan.md`
   }
   /** The pane /omh plan opened beside the lead to preview plan.md. */
   get planView() {
@@ -171,6 +181,18 @@ export async function readGates($: Engine, paths: Paths, run: string): Promise<S
   return new Set(Array.isArray(g?.passed) ? g.passed : [])
 }
 
+/** The run current-run names once its directory exists, plan.json or not (a run being drafted). */
+export async function openRunId($: Engine, paths: Paths): Promise<string | null> {
+  try {
+    const id = (await $.fs.read(paths.currentRun)).trim()
+    if (id && (await $.fs.exists(paths.run(id)))) return id
+  } catch {
+    // none yet
+  }
+  return null
+}
+
+/** The current run once it has a plan.json: the one tasks are dispatched in. */
 export async function currentRunId($: Engine, paths: Paths): Promise<string | null> {
   try {
     const id = (await $.fs.read(paths.currentRun)).trim()

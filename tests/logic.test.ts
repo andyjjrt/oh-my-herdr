@@ -5,7 +5,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { normalizeConfig } from '../hooks/lib/config'
 import { diagnose } from '../hooks/lib/diagnose'
 import { ownerOf, relativeTo } from '../hooks/lib/guards'
-import { draftDigest, findTask, isApproved, isScout, parsePlan, SCOUT_ID, runView, statusFile, taskStatus, waveProgress, type TaskFacts } from '../hooks/lib/plan'
+import { closestName, draftDigest, findTask, isApproved, isScout, parsePlan, planningStatusFile, planRunId, SCOUT_ID, runView, statusFile, taskStatus, unknownCategory, waveProgress, type TaskFacts } from '../hooks/lib/plan'
 import { evaluate, formatQuota, parseClaude, parseCommandQuota, parseOpencodeGo, probe, providerOf, providersOf, quotaAllows } from '../hooks/lib/quota'
 import { cell, table } from '../hooks/lib/md'
 import { isUsualPair, pickProfile } from '../hooks/lib/route'
@@ -239,17 +239,57 @@ describe('plan', () => {
       goal: view.goal,
       wave: 1,
       waves: view.waves.length,
-      done: 1,
+      done: 0,
       total,
       alerts: 1,
       wave_done: 1,
       wave_total: 2,
-      line: `${'█'.repeat(Math.round((1 / total) * 6))}${'░'.repeat(6 - Math.round((1 / total) * 6))} 1/${total} ⚠1`,
+      line: `░░░░░░ 0/${total} ⚠1`,
       updated_at: '2026-11-14T00:00:00.000Z',
+      stage: 'running',
     })
+    // Every task closed but the last gate open: the run is not done yet.
+    const lastOpen = new Set(view.waves.slice(0, -1).map(w => w.id))
+    const closed = statusFile(runView('r1', '/x', r.plan, lastOpen, () => ({ ...none, dispatched: true, hasResult: true, verified: true })), new Date())!
+    const last = view.waves[view.waves.length - 1]!.tasks.length
+    expect(closed.done).toBe(total - last)
+    expect(closed.line.endsWith(` ${total - last}/${total}`)).toBe(true)
+    expect(closed.wave_done).toBe(last)
     // Every gate passed: nothing to show, and the mod removes the file.
     const gates = new Set(view.waves.map(w => w.id))
     expect(statusFile(runView('r1', '/x', r.plan, gates, () => none), new Date())).toBe(null)
+  })
+})
+
+describe('runs and categories by name', () => {
+  const now = new Date(2026, 10, 17, 20, 5)
+  test('a draft name becomes a dated run id; a dated one is kept', () => {
+    expect(planRunId('Model groups & inheritance', now)).toBe('20261117-model-groups-inheritance')
+    expect(planRunId('20261116-helm-values', now)).toBe('20261116-helm-values')
+    expect(planRunId('  ---  ', now)).toBe(null)
+    expect(planRunId('x'.repeat(80), now)!.length).toBe(9 + 40)
+  })
+
+  test('an unknown category names the closest one, and says when it is an intent', () => {
+    const known = ['oracle', 'deep', 'visual-engineering', 'reviewer', 'quick']
+    expect(closestName('review', known)).toBe('reviewer')
+    expect(closestName('qiuck', known)).toBe('quick')
+    expect(closestName('frontend', known)).toBe(null)
+    const msg = unknownCategory('review', known)
+    expect(msg).toContain("did you mean 'reviewer'?")
+    expect(msg).toContain("'review' is an intent")
+    expect(unknownCategory('frontend', known)).not.toContain('did you mean')
+  })
+
+  test('parsePlan carries the hint', () => {
+    const r = parsePlan({ goal: 'g', waves: [{ id: 1, gate: 'tests', tasks: [{ id: 'T1', title: 't', intent: 'review', category: 'review', owns: [], deps: [] }] }] }, ['deep', 'reviewer'])
+    expect('errors' in r && r.errors.join('\n')).toContain("did you mean 'reviewer'?")
+  })
+
+  test('a run being planned has a status file too', () => {
+    const f = planningStatusFile('20261117-x', 'Plan: x', 'draft', new Date('2026-11-17T00:00:00Z'))
+    expect(f).toMatchObject({ run: '20261117-x', goal: 'Plan: x', stage: 'draft', line: '✎ plan draft', total: 0 })
+    expect(planningStatusFile('r', 'g', 'approved', new Date()).line).toBe('✓ plan approved')
   })
 })
 
@@ -654,6 +694,7 @@ describe('tool rows', () => {
     expect(OMH_TOOL.test('mcp__other__omh_status')).toBe(false)
     expect(callSummary(T('dispatch'), { task: 'T3', intent: 'implement', category: 'deep', rationale: 'r', brief: 'long brief' })).toBe('T3 · implement · deep')
     expect(callSummary(T('status'), { action: 'draft', markdown: '# Plan: gateways UI\n\n## Goal\nx' })).toBe('draft · Plan: gateways UI · 4 lines')
+    expect(callSummary(T('status'), { action: 'draft', name: 'gateways-ui', markdown: '# Plan: gateways UI' })).toBe('draft · new run gateways-ui · Plan: gateways UI · 1 line')
     expect(callSummary(T('status'), { action: 'plan', plan: { goal: 'g', waves: [{ tasks: [1, 2] }, { tasks: [3] }] } })).toBe('plan · 2 waves, 3 tasks')
     expect(callSummary(T('status'), { action: 'gate', wave: 2 })).toBe('gate · W2')
     expect(callSummary(T('status'), {})).toBe('show')

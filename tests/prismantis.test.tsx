@@ -81,7 +81,7 @@ describe('without prismantis', () => {
 
 describe('/omh plan pane', () => {
   const PLAN = '# Ship it\n\n| Task | Owns |\n|---|---|\n| T1 | a.ts |\n'
-  /** A disk holding only the draft plan.md. */
+  /** A disk holding only a pre-0.4 draft, .omh/plan.md (the preview falls back to it). */
   function disk(on: any) {
     on('fs.stat', (_$: any, e: any) => {
       if (e.path === '/work/.omh/plan.md') return { value: { kind: 'file', size: PLAN.length } }
@@ -94,7 +94,7 @@ describe('/omh plan pane', () => {
   }
   const PANE = { plugin: 'oh-my-herdr', surface: 'terminal', component: 'Pane', requestId: 'omh-plan', props: { title: 'plan.md', isFocused: false, bodyColumns: 60, placement: 'dock' } } as never
 
-  test('draws the draft through prismantis under its path', async ($, on) => {
+  test('draws an old .omh/plan.md through prismantis under its path', async ($, on) => {
     const seen: string[] = []
     prismantis(on, seen)
     disk(on)

@@ -60,7 +60,7 @@ describe('pieces', () => {
     expect(progressBar(2, 5)).toBe('██░░░░')
     expect(progressBar(5, 5)).toBe('██████')
     expect(progressBar(0, 0)).toBe('░░░░░░')
-    expect(progressText(RUN as never)).toBe('omh ██░░░░ 1/3 ⚠1')
+    expect(progressText(RUN as never)).toBe('omh ░░░░░░ 0/3 ⚠1')
     expect(progressText(null)).toBe(null)
     expect(progressText({ ...RUN, current: null } as never)).toBe(null)
   })
@@ -71,7 +71,7 @@ describe('display: statusline (the default)', () => {
     on('state.get', state(RUN))
     engine(on as never)
     const ui = await $.ui.mount({ ...HINT, surface: 'terminal' } as never)
-    expect(textOf(await ui.drawn())).toBe('(shift+tab to cycle) · esc to interrupt | omh ██░░░░ 1/3 ⚠1')
+    expect(textOf(await ui.drawn())).toBe('(shift+tab to cycle) · esc to interrupt | omh ░░░░░░ 0/3 ⚠1')
     await ui.unmount()
     const above = await $.ui.mount({ ...ABOVE, surface: 'terminal' } as never)
     expect(textOf(await above.drawn())).toBe('engine')
@@ -96,7 +96,7 @@ describe('display: panel', () => {
     await hint.unmount()
     const ui = await $.ui.mount({ ...ABOVE, surface: 'terminal' } as never)
     const drawn = (await ui.drawn()) as Drawn
-    expect(textOf(nodes(drawn)[0])).toBe('omh ██░░░░ 1/3 · W1/2 · ⚠1')
+    expect(textOf(nodes(drawn)[0])).toBe('omh ░░░░░░ 0/3 · W1/2 · ⚠1')
     // What else is drawn above the prompt stays, under the row.
     expect(textOf(drawn).endsWith('engine')).toBe(true)
     await ui.unmount()

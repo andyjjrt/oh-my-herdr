@@ -54,7 +54,7 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
    | write | docs and prose | writing |
 
    An unusual pair is allowed; your `rationale` says why.
-3. **Draft plan.md, then stop.** `omh_status` with `action: "draft"` and `markdown`: the plan in prose — goal, what exploring found (file:line), approach, each task with its acceptance check, risks, open questions. It is saved as `.omh/plan.md`. Give the user a short summary and the path, mention that `/omh plan` previews it in a pane beside you, then **end your turn**. The user reads (or edits) it and approves with `/omh approve`, which wakes you with a prompt to derive the waves; if they ask for changes, draft again. Until then `action: "plan"` is refused.
+3. **Draft the plan, then stop.** `omh_status` with `action: "draft"`, `markdown` and `name`: the plan in prose — goal, what exploring found (file:line), approach, each task with its acceptance check, risks, open questions. `name` is a short slug for the work (`"model-groups"`); it starts the run `.omh/runs/<date>-<name>/` and the plan is saved there as `draft.md`. Give the user a short summary and the path, mention that `/omh plan` previews it in a pane beside you, then **end your turn**. The user reads (or edits) it and approves with `/omh approve`, which renames it to the run's `plan.md` and wakes you with a prompt to derive the waves; if they ask for changes, draft again **without** `name` (that revises the current run). Until then `action: "plan"` is refused.
 4. **Derive the waves.** Once plan.md is approved, `omh_status` with `action: "plan"` and the plan.json that splits it into waves:
 
    ```json
@@ -66,7 +66,7 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
              "owns": ["src/api/orders.ts"], "deps": [] } ] } ] }
    ```
 
-   Tasks in one wave must not own the same files (the tool refuses it); `deps` point at earlier waves. Every wave needs a gate you can actually check. Replanning the current run is fine, but each plan.json needs plan.md approved again (draft the change, stop, wait for `/omh approve`); `new_run: true` starts a fresh one. The approved plan.md is kept with the run as `.omh/runs/<run>/plan.md`. For a risky plan, make wave 1 an `oracle` critique.
+   Tasks in one wave must not own the same files (the tool refuses it); `deps` point at earlier waves. Every wave needs a gate you can actually check. `category` is a routing name from the config (`deep`, `reviewer`, …), not the intent. A rejected plan keeps its approval: fix it and send it again. To change the plan mid-run, draft again without `name`, stop, and wait for `/omh approve` (the old plan.md is kept as `plan.v<n>.md`); for new work, draft with a new `name`. For a risky plan, make wave 1 an `oracle` critique.
 5. **Dispatch the wave.** `omh_dispatch` per task: `task`, `intent`, `category`, a one-line `rationale`, and a self-contained `brief` (template in `references/roles.md`). The files the task owns and the reporting contract are appended for you. Leave `worker` and `profile` out unless the user asked for a specific one — routing picks a profile with quota and starts or reuses a worker. For a review task, pass `reviews: <task id>` so the reviewer comes from another model family.
 6. **Stop.** After dispatching, end your turn (or do unrelated work). Do not sleep, poll, or run `herdr agent wait`. The mod sends you a message:
    - **Wave settled** — a table of every task's state. Continue at step 7.

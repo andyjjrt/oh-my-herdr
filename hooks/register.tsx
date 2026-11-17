@@ -56,17 +56,17 @@ const TOOLS = [
   {
     name: 'omh_status',
     description: [
-      'The run\'s plan and progress. action "show": waves, tasks, workers. "draft": write plan.md, the plan in prose (goal, findings with file:line, approach, tasks with acceptance checks, risks, open questions); then summarise it for the user and end your turn — they approve it with /omh approve.',
-      '"plan": only after plan.md is approved, save plan.json derived from it (goal; waves with id, gate and tasks; each task id, title, intent, category, owns[], deps[]); tasks in one wave must not own the same files. Each plan.json needs plan.md approved again.',
+      'The run\'s plan and progress. action "show": waves, tasks, workers. "draft": write the plan in prose (goal, findings with file:line, approach, tasks with acceptance checks, risks, open questions) as the run\'s draft.md; give "name" to start a run for new work (.omh/runs/<date>-<name>/), leave it out to revise the current run\'s plan. Then summarise it for the user and end your turn — /omh approve makes it the run\'s plan.md.',
+      '"plan": only after plan.md is approved, save the current run\'s plan.json derived from it (goal; waves with id, gate and tasks; each task id, title, intent, category, owns[], deps[]); tasks in one wave must not own the same files, and category is a routing name from the config, not the intent. A rejected plan can be fixed and sent again; a different plan.md needs a new draft and approval.',
       '"verified" / "abandon": close a task with a one-line `quality` note on how good the result was ("abandon" also closes a scout that brought nothing back). "gate": mark a wave\'s gate passed once all its tasks are closed; the next wave cannot be dispatched before that.',
     ].join(' '),
     inputSchema: {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['show', 'draft', 'plan', 'verified', 'abandon', 'gate'] },
-        markdown: { type: 'string', description: 'For "draft": the whole plan.md' },
+        markdown: { type: 'string', description: 'For "draft": the whole plan, as markdown' },
+        name: { type: 'string', description: 'For "draft": a short slug naming new work, which starts a new run (.omh/runs/<date>-<name>/). Leave it out to revise the current run\'s plan.' },
         plan: { type: 'object', description: 'For "plan": { goal, waves: [{ id, gate, tasks: [{ id, title, intent, category, owns, deps }] }] }' },
-        new_run: { type: 'boolean', description: 'For "plan": start a new run instead of replanning the current one' },
         task: { type: 'string' },
         quality: { type: 'string', description: 'For "verified"/"abandon": one sentence on the result\'s quality' },
         wave: { type: 'number', description: 'For "gate"' },
@@ -121,9 +121,9 @@ async function serve(name: string, a: Args): Promise<Answer> {
     case 'omh_status':
       switch (a.action) {
         case 'draft':
-          return draftPlan(typeof a.markdown === 'string' ? a.markdown : '')
+          return draftPlan(typeof a.markdown === 'string' ? a.markdown : '', s(a.name))
         case 'plan':
-          return writePlan(a.plan, a.new_run === true)
+          return writePlan(a.plan)
         case 'verified':
           return closeTask(s(a.task) ?? '', s(a.quality) ?? '', 'verified')
         case 'abandon':
@@ -247,7 +247,7 @@ export const register: Register = (on, options) => {
         if (answer.ok) {
           $.clock.after(0, () => {
             $.prompt
-              .submit({ text: 'plan.md approved (/omh approve). Derive the waves from .omh/plan.md with omh_status action "plan", then dispatch the first wave.', asUser: true })
+              .submit({ text: `plan.md approved (/omh approve). Derive the waves from ${answer.file ?? "the current run's plan.md"} with omh_status action "plan", then dispatch the first wave.`, asUser: true })
               .catch(err => $.ui.toast(`oh-my-herdr: could not wake the lead: ${(err as Error).message}`))
           })
         }

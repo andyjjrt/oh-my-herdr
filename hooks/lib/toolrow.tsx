@@ -28,6 +28,8 @@ export function callSummary(tool: string, input: unknown): string {
       bits.push(action)
       if (action === 'draft') {
         const md = str(a.markdown) ?? ''
+        const name = str(a.name)
+        if (name) bits.push(`new run ${name}`)
         const title = md.split('\n').find(l => l.trim() !== '')?.replace(/^#+\s*/, '')
         if (title) bits.push(title.length > 60 ? `${title.slice(0, 59)}…` : title)
         bits.push(plural(md === '' ? 0 : md.split('\n').length, 'line'))
@@ -36,7 +38,6 @@ export function callSummary(tool: string, input: unknown): string {
         const waves = Array.isArray(plan.waves) ? (plan.waves as Args[]) : []
         const tasks = waves.reduce((n, w) => n + (Array.isArray(w?.tasks) ? (w.tasks as unknown[]).length : 0), 0)
         bits.push(`${plural(waves.length, 'wave')}, ${plural(tasks, 'task')}`)
-        if (a.new_run === true) bits.push('new run')
       } else if (action === 'gate' && typeof a.wave === 'number') bits.push(`W${a.wave}`)
       else push(a.task)
       break

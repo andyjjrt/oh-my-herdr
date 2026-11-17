@@ -3,7 +3,7 @@
 #
 #   omh-wave [dir]            the ready line, e.g. "██░░░░ 2/5" or "██░░░░ 2/5 ⚠1"; nothing when no run is open
 #   omh-wave --json [dir]     the whole .omh/status.json
-#   omh-wave --field F [dir]  one field: run goal wave waves done total alerts wave_done wave_total line updated_at
+#   omh-wave --field F [dir]  one field: run goal wave waves done total alerts wave_done wave_total line updated_at stage
 #
 # dir defaults to the current directory; the nearest .omh/status.json at or above it is used.
 # The mod (hooks/lib/runtime.ts) keeps that file current while a run is open and removes it after.

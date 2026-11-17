@@ -38,7 +38,7 @@ family for a review.
 
 | Profile field | Meaning |
 | --- | --- |
-| `agent` | How the worker starts: `claude`, `senpi` or `subagent` built in ([agents.json](../skills/oh-my-herdr/assets/agents.json)), or one of `agents` |
+| `agent` | How the worker starts: `claude`, `pi`, `senpi` or `subagent` built in ([agents.json](../skills/oh-my-herdr/assets/agents.json)), or one of `agents` |
 | `args` | Passed unchanged to that agent's CLI: model, reasoning level, permission flags |
 | `family` | Any label; a reviewer is routed outside the reviewed task's family |
 | `model`, `subagent_type` | Subagent profiles only: the model alias or id, and the agent type (`general-purpose` by default) |
