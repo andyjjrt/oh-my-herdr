@@ -1,0 +1,66 @@
+# Changelog
+
+## 0.4.0 — 2026-11-17
+
+### Changed
+
+- **Each piece of work gets its own run directory when its plan is first drafted.** `omh_status`
+  action `draft` takes a `name`, which starts the run `.omh/runs/<YYYYMMDD>-<name>/` and makes it
+  current. The plan is written there as `draft.md`, and `/omh approve` renames it to the run's
+  `plan.md`. A draft without `name` revises the current run's plan. When a revision is approved,
+  the previous plan is kept as `plan.v<n>.md`.
+  - Before, plans were drafted to a shared `.omh/plan.md`. `omh_status plan` without `new_run`
+    wrote into whatever run was current, so a new plan could overwrite an old, finished run's
+    `plan.json` and `plan.md`.
+  - The first draft must have a `name`.
+  - A name already used by another run is refused.
+  - Starting a new run is refused while workers are still out on the current one.
+- **`new_run` is removed** from `omh_status`. `plan` always saves into the current run.
+- **A rejected plan keeps its approval.** The lead can fix it and send it again. The approval now
+  holds as long as the run's `plan.md` is unchanged; it is no longer used up by the first save.
+  `plan` is still refused while a newer draft is waiting for `/omh approve`.
+- **Run progress counts a task as done once its wave's gate has passed.** This applies to the
+  status line, the panel, and `status.json`'s `done` and `line`. A run whose last gate is still
+  open now shows `4/5`, not `5/5`. `wave_done` still counts the current wave's tasks that are
+  reported or closed.
+- The wake-up after `/omh approve` names the run's `plan.md`.
+- `/omh plan` previews the current run's `draft.md`, else its `plan.md`, else a leftover
+  `.omh/plan.md` from an older version.
+
+### Added
+
+- **`pi` is a built-in agent** (`"launch": "herdr-kind", "kind": "pi"`), so profiles can use
+  `"agent": "pi"` (or `"kind": "pi"`) without an `agents` entry.
+- **`status.json` has a `stage` field** with the value `draft`, `approved` or `running`. The file is
+  also written before a run has waves: its `line` is `✎ plan draft`, then `✓ plan approved`.
+  `omh-wave --field stage` reads it.
+- **An unknown category suggests the closest one** (`'review'` → did you mean `'reviewer'`?). When
+  the name is an intent, the message says that a category is a routing name from the config.
+
+### Upgrading
+
+- A `.omh/plan.md` left from 0.3 is not moved. `/omh plan` still shows it; have the lead draft it
+  again with a `name`.
+- Runs already in progress keep working as they are.
+
+## 0.3.0 — 2026-11-15
+
+- Scouts: read-only `scout-<name>` tasks dispatched before a plan exists.
+- `/omh plan` previews `plan.md` beside the lead.
+- Subagent workers (`"agent": "subagent"`) run a task as a Claude Code subagent of the lead.
+- Worker tabs in the lead's workspace (`max_panes_per_tab`).
+- Markdown answers for `/omh status`, `status full`, `quota` and `check`.
+- Quota from any provider by command (`quota.providers.<name>` as a shell line).
+- `docs/`, and a shorter README.
+
+## 0.2.0 — 2026-11-14
+
+- Plan approval with `/omh approve`.
+- Compact tool rows.
+- Run progress for the status line.
+- herdr's own skill is bundled.
+- README in English.
+
+## 0.1.0 — 2026-11-14
+
+- First release.
