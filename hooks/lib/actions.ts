@@ -6,7 +6,9 @@ import type { OmhWorker } from '../../types'
 import { configProblems, isSubagentProfile, type Config } from './config'
 import { diagnose, excerpt } from './diagnose'
 import { currentRunId, hasText, openRunId, listWorkers, readGates, readJson, remove, writeJson, type Closing, type DispatchFile, type WorkerFile } from './files'
-import { agentStatus, closePane, createTab, herdr, HerdrError, paneExists, paneHome, readScreen, shellQuote, splitPane, tabPanes } from './herdr'
+import { agentStatus, closePane, paneExists, promptWorker, readCommand, readScreen, resolveBackend, type BackendKind } from './backend'
+import { hcPane, hcRun, hcWaitReady, PASS_ENV, placement } from './hc'
+import { createTab, herdr, HerdrError, paneHome, shellQuote, splitPane, tabPanes } from './herdr'
 import { place, type TabSlot } from './layout'
 import { DONE, draftDigest, findTask, isApproved, isScout, parsePlan, planRunId, SCOUT_ID, SCOUT_INTENTS, SCOUT_RUN, TASK_ID, unknownCategory } from './plan'
 import { code, table } from './md'
@@ -106,15 +108,23 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
   if (!spec) return fail(`profile '${profile}' uses unknown agent '${prof.agent}'`)
   if (spec.launch === 'subagent') return fail(`profile '${profile}' runs as a subagent, which starts with its task: omh_dispatch it instead`)
   const cwd = args.cwd ?? p.root
+  const kind = await backendOf(cfg)
+  if ('error' in kind) return fail(kind.error)
 
   let pane: string
-  try {
-    pane = await workerPane(cfg.maxPanesPerTab, cwd)
-  } catch (err) {
-    return fail(`could not get a pane: ${(err as Error).message}`)
+  let started: Awaited<ReturnType<typeof startAgent>>
+  if (kind.kind === 'hc') {
+    const s = await startHcWorker(args.name, cfg, spec, prof.args, cwd)
+    if ('text' in s) return s
+    ;({ pane, started } = s)
+  } else {
+    try {
+      pane = await workerPane(cfg.maxPanesPerTab, cwd)
+    } catch (err) {
+      return fail(`could not get a pane: ${(err as Error).message}`)
+    }
+    started = await startAgent(args.name, pane, spec.launch, spec, prof.args, cwd)
   }
-
-  const started = await startAgent(args.name, pane, spec.launch, spec, prof.args, cwd)
   const file: WorkerFile = {
     name: args.name,
     category: args.category ?? null,
@@ -145,7 +155,7 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
     await setWorker({ ...worker, diagnosis: diag })
     return fail(
       [
-        `worker '${args.name}' (${profile}) did not become ready in pane ${pane}: ${started.reason}`,
+        `worker '${args.name}' (${profile}) did not become ready in ${pane}: ${started.reason}`,
         `Diagnosis: ${diag.verdict} — ${diag.evidence}`,
         `Hint: ${diag.hint}`,
         'Screen:',
@@ -157,6 +167,44 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
     )
   }
   return { worker, warnings }
+}
+
+/** Where new pane workers start, from config.json's "backend" and where the lead runs. */
+export async function backendOf(cfg: Config): Promise<{ kind: BackendKind } | { error: string }> {
+  return resolveBackend(cfg.backend, { inHerdr: (await host().env.get('HERDR_ENV')) === '1', inHc: rt.selfTerminal !== null })
+}
+
+/**
+ * A worker in a new hc terminal: a child of the lead's terminal that outlives it, in an omh tab of
+ * the lead's space when the lead is in the Herdr app (config hc.panes). The program gets the lead's
+ * PATH and OMH_ROLE=worker, since the hc core runs programs in its own environment.
+ */
+async function startHcWorker(
+  name: string,
+  cfg: Config,
+  spec: NonNullable<Config['agents'][string]>,
+  args: string[],
+  cwd: string,
+): Promise<{ pane: string; started: Awaited<ReturnType<typeof startAgent>> } | Answer> {
+  const $ = host()
+  const env: Record<string, string> = {}
+  for (const k of PASS_ENV) {
+    const v = await $.env.get(k)
+    if (v) env[k] = v
+  }
+  Object.assign(env, spec.env ?? {}, { OMH_ROLE: 'worker' })
+  const argv = [...(spec.launch === 'command' ? (spec.command ?? [spec.bin]) : [spec.bin]), ...args]
+  let address: string
+  try {
+    const labels = { 'omh.worker': name, ...(await placement($, { cfg: cfg.hc, root: paths().root, lead: rt.selfTerminal, maxPanes: cfg.maxPanesPerTab })) }
+    address = await hcRun($, { name, cwd, argv, env, labels, notify: cfg.hc.notify })
+  } catch (err) {
+    return fail(`could not start a herdr-core terminal for '${name}': ${(err as Error).message}`)
+  }
+  const pane = hcPane(address)
+  const ready = await hcWaitReady($, pane, STARTUP_MS)
+  if (ready.ok) return { pane, started: { ok: true, status: ready.status } }
+  return { pane, started: { ok: false, status: ready.status, reason: ready.reason, screen: await readScreen($, pane, 40).catch(() => '') } }
 }
 
 type TabRecord = { tab: string; root_pane: string; used?: boolean }
@@ -369,7 +417,9 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
     } else {
       // Reuse a free pane worker on that profile; otherwise start one named after the task.
       worker = Object.values(ws).find(w => w.profile === profile && isFree(w) && w.phase !== 'gone' && !isSubagentWorker(w))
-      if (worker && (await agentStatus($, worker.pane).catch(() => 'gone')) !== 'idle') worker = undefined
+      // hc keeps a finished turn's 'done' until the next report; herdr may show either.
+      const free = worker ? await agentStatus($, worker.pane).catch(() => 'gone') : 'gone'
+      if (free !== 'idle' && free !== 'done') worker = undefined
       if (!worker) {
         const name = await freeName(workerBase)
         const s = await spawn({ name, profile, intent, ...(a.cwd !== undefined && { cwd: a.cwd }) })
@@ -451,9 +501,9 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
     const wf = await readJson<WorkerFile>($, p.agent(worker.name))
     if (wf) await writeJson($, p.agent(worker.name), { ...wf, run, task: task.id, task_dir: dir, category })
     try {
-      await herdr($, ['agent', 'prompt', worker.name, instruction])
+      await promptWorker($, worker, instruction)
     } catch (err) {
-      return fail(`prompt failed for '${worker.name}': ${(err as Error).message}${err instanceof HerdrError && err.code === 'agent_blocked' ? ' — it is waiting on a dialog; read it with herdr agent read and ask the user' : ''}`)
+      return fail(`prompt failed for '${worker.name}': ${(err as Error).message}${err instanceof HerdrError && err.code === 'agent_blocked' ? ` — it is waiting on a dialog; read it with \`${readCommand(worker)}\` and ask the user` : ''}`)
     }
     await feed(worker.name, { kind: 'dispatch', at: now, task: task.id, run })
   }
@@ -648,7 +698,7 @@ export async function togglePlanView(): Promise<Answer> {
   }
   const file = await planFile()
   if (file === null) return fail('no plan yet; the lead writes it with omh_status action "draft"')
-  if (rt.selfPane === null) return fail('cannot tell which herdr pane is the lead (HERDR_PANE_ID is not set)')
+  if (rt.selfPane === null) return fail('the plan preview opens in a herdr pane, and the lead is not in herdr; read the plan file instead, or use prismantis to see it beside you')
   try {
     const pane = await splitPane($, rt.selfPane, 'right', p.root)
     await writeJson($, p.planView, { pane })
@@ -844,13 +894,30 @@ export async function teardown(names: string[] | undefined): Promise<Answer> {
 export async function check(): Promise<Answer> {
   const $ = host()
   const which = async (bin: string) => (await $.process.run(['sh', '-c', 'command -v "$1"', 'sh', bin]).catch(() => null))?.stdout.trim() || null
-  const env: string[][] = [['inside herdr', (await $.env.get('HERDR_ENV')) === '1' ? `✅ yes (pane ${rt.selfPane ?? '?'})` : '⛔ no: oh-my-herdr needs herdr']]
-  for (const bin of ['herdr', 'python3', 'git']) env.push([bin, (await which(bin)) ? '✅ ok' : '⛔ missing'])
+  const inHerdr = (await $.env.get('HERDR_ENV')) === '1'
+  const env: string[][] = [
+    ['inside herdr', inHerdr ? `✅ yes (pane ${rt.selfPane ?? '?'})` : '➖ no'],
+    ['inside herdr-core', rt.selfTerminal !== null ? `✅ yes (terminal ${rt.selfTerminal})` : '➖ no'],
+  ]
   let cfg: Config
   try {
     cfg = await config()
   } catch (err) {
     return fail(['oh-my-herdr check: the config did not load.', '', table(['Check', 'Result'], [...env, ['config', `⛔ ${(err as Error).message}`]])].join('\n'))
+  }
+  const kind = await backendOf(cfg)
+  env.push(['backend', 'error' in kind ? `⛔ ${kind.error}` : `✅ ${kind.kind}${cfg.backend === 'auto' ? ' (auto)' : ''}`])
+  const usesHc = !('error' in kind) && kind.kind === 'hc'
+  for (const bin of [usesHc ? 'hc' : 'herdr', 'python3', 'git']) env.push([bin, (await which(bin)) ? '✅ ok' : '⛔ missing'])
+  if (usesHc) {
+    const core = await $.process.run(['hc', 'server', 'status', '--json'], { timeoutMs: 10_000 }).catch(() => null)
+    let version = ''
+    try {
+      version = String((JSON.parse(core?.stdout ?? '') as { version?: unknown }).version ?? '')
+    } catch {
+      // not JSON: no core answered
+    }
+    env.push(['herdr-core', core?.exitCode === 0 && version ? `✅ running (${version})` : '⛔ not running: start it with `hc server start`'])
   }
   const agents: string[][] = []
   for (const a of new Set(Object.values(cfg.profiles).map(pr => pr.agent))) {

@@ -37,7 +37,9 @@ flowchart TB
 | `hooks/lib/settle.ts` | The worker state machine (pure) |
 | `hooks/lib/route.ts` · `quota.ts` | Category → profile, skipping providers out of quota ([quota.md](quota.md)) |
 | `hooks/lib/subagent.ts` | Subagent workers: status mapping, the report contract |
-| `hooks/lib/layout.ts` | Where the next pane worker goes: tabs and splits |
+| `hooks/lib/backend.ts` | Pane workers in herdr or herdr-core: picks where new ones start, routes each call by its pane id |
+| `hooks/lib/herdr.ts` · `hc.ts` | The herdr and `hc` CLIs; `hc:<address>` is an hc worker's pane id |
+| `hooks/lib/layout.ts` | Where the next herdr pane worker goes: tabs and splits |
 | `hooks/lib/diagnose.ts` | Why a worker stopped, from its screen (or a subagent's answer) |
 | `hooks/lib/plan.ts` · `files.ts` | The plan, task status, and the `.omh/` layout |
 | `hooks/lib/text.ts` · `md.ts` | What the lead and you read: wake-ups, status, tables |
@@ -111,7 +113,7 @@ stateDiagram-v2
 
 | | Pane worker | Subagent worker |
 | --- | --- | --- |
-| Status from | herdr's event stream (`scripts/omh-watch.py`) | `$.agent.list()` every 10 s |
+| Status from | herdr's event stream, or `hc events` for an hc worker (`scripts/omh-watch.py`) | `$.agent.list()` every 10 s |
 | End | idle or done on screen | its `turn.complete` |
 | Report | writes `result.md`, replies `DONE <path>` | its final reply, saved as `result.md` by the mod |
 | Diagnosis reads | the pane's screen | its status, end reason and answer |

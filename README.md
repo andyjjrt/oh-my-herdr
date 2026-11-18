@@ -26,6 +26,9 @@ flowchart LR
 Answer `y` to `Add marketplace?`, then pick an install scope.
 
 **2. Open Claude Code inside herdr.** Start `herdr`, then run `claude` in a pane, in your project.
+Or use [herdr-core](https://github.com/herdrdev/herdr-core) and the Herdr desktop app: run `claude`
+in a Herdr app pane, and workers start as hc terminals there
+([Where workers run](docs/configuration.md#where-workers-run-herdr-or-herdr-core)).
 
 **3. Check the setup once.** It shows the config in effect, the agents it needs and each
 subscription's quota; fix anything it flags.

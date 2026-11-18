@@ -10,7 +10,8 @@ import type { OmhDiagnosis, OmhQuota, OmhRunView, OmhWorker } from '../../types'
 import { type Config, loadConfig } from './config'
 import { diagnose, excerpt } from './diagnose'
 import { appendLine, currentRunId, hasText, openRunId, listWorkers, Paths, readGates, readJson, remove, type Closing, type DispatchFile, writeJson } from './files'
-import { agentStatus, notify, readScreen } from './herdr'
+import { agentStatus, readScreen, watchArgv } from './backend'
+import { notify } from './herdr'
 import { type OmhStatusFile, type Plan, parsePlan, planningStatusFile, runView, SCOUT_RUN, statusFile, type TaskFacts } from './plan'
 import { probe, providerOf, providersOf, quotaAllows, type Provider } from './quota'
 import { ACTIVE, newWorker, type SettleEffect, type SettleEvent, step } from './settle'
@@ -52,7 +53,10 @@ export const rt = {
   cfg: null as Config | null,
   cfgError: null as string | null,
   watchPy: '',
+  /** The lead's herdr pane (HERDR_PANE_ID), when it runs in herdr. */
   selfPane: null as string | null,
+  /** The lead's herdr-core terminal (HC_TERMINAL_ID), when it runs in one (a Herdr app pane, `hc run claude`). */
+  selfTerminal: null as string | null,
   watchers: new Map<string, { pane: string; stopped: boolean }>(),
   timers: new Map<string, Timer>(),
   queues: new Map<string, Promise<void>>(),
@@ -406,7 +410,7 @@ export function startWatcher(name: string, pane: string): void {
       let ended = false
       let buf = ''
       try {
-        const stream = $.process.spawn({ argv: ['python3', '-I', rt.watchPy, '--pane', pane, '--name', name] })
+        const stream = $.process.spawn({ argv: watchArgv(rt.watchPy, pane, name) })
         for await (const chunk of stream) {
           if (ctl.stopped) break
           if (chunk.stream === 'stderr') {

@@ -84,12 +84,55 @@ The built-in config mixes them:
 | visual-engineering | claude-sonnet → ◆ sub-sonnet → go-deepseek |
 | writing | go-deepseek → ◆ sub-sonnet → claude-sonnet |
 
+## Where workers run: herdr or herdr-core
+
+Pane workers run either in **herdr** panes or in **herdr-core** (`hc`) terminals, the core that the
+[Herdr desktop app](https://github.com/herdrdev/herdr-app) is a window on. `backend` picks:
+
+```jsonc
+{
+  "backend": "auto",            // "auto" | "herdr" | "hc"
+  "hc": {
+    "panes": "tab",             // in the Herdr app: "tab" or "none"
+    "notify": false             // let hc type notes about workers into the lead
+  }
+}
+```
+
+| `backend` | New workers start in |
+| --- | --- |
+| `auto` (default) | herdr panes when the lead is in herdr, hc terminals otherwise |
+| `herdr` | herdr panes; refused when the lead is not in herdr |
+| `hc` | hc terminals, wherever the lead runs |
+
+The mod wakes up when the lead runs in herdr (`HERDR_ENV=1`) or in an hc terminal
+(`HC_TERMINAL_ID`: a Herdr app pane, or `hc run claude`). Workers already running keep the backend
+they started on, so changing `backend` mid-run is safe.
+
+With hc:
+
+- **Status comes from the agent itself** (OSC 7501), not from reading the screen. Claude Code and
+  pi report it; an agent that does not report never becomes ready.
+- **Workers get the lead's `PATH`** and `OMH_ROLE=worker`, because the hc core runs programs in its
+  own environment. Secrets (API keys, tokens) are not passed, since hc shows a terminal's argv to
+  anyone who lists it: put them where the core sees them, or restart the core from your shell
+  with `hc server restart --fresh`.
+- **Workers outlive the lead** (`--outlive-parent`) and are reattached when it starts again.
+- **In the Herdr app**, with `hc.panes` set to `tab`, workers open in omh tabs of the lead's space,
+  `max_panes_per_tab` to a tab, through the app's `herdr.space` and `herdr.tab` labels. With
+  `none` they stay sub-agents of the lead: in the agents list, opened with a click. Outside the app
+  they are plain hc terminals: `hc ls`, `hc attach <address>`.
+- **hc's own notes are off** (`hc.notify`): the lead is a Claude Code prompt, and the mod already
+  wakes it.
+- There are no desktop notifications, and `/omh plan` needs prismantis to show the plan beside you.
+
 ## Worker tabs
 
 Pane workers open in `omh-workers` tabs in the lead's own workspace; herdr adds a new tab after the
 workspace's other tabs. A tab takes `max_panes_per_tab` panes (default 4): its first pane, then
 splits of the last pane, right and down in turn. The next worker opens `omh-workers-2`, and so on.
-A pane freed by `/omh teardown` is used again.
+A pane freed by `/omh teardown` is used again. (With hc, see
+[Where workers run](#where-workers-run-herdr-or-herdr-core).)
 
 ## Agents (launch definitions)
 

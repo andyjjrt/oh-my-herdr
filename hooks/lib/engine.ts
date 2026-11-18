@@ -19,6 +19,8 @@ const WAKE = atom({ plugin: 'oh-my-herdr', key: 'wake' } as const, { sections: [
 export type EnvName =
   | 'HERDR_ENV'
   | 'HERDR_PANE_ID'
+  | 'HC_TERMINAL_ID'
+  | 'PATH'
   | 'OMH_ROLE'
   | 'OMH_DIR'
   | 'OMH_CONFIG'
@@ -61,6 +63,8 @@ export async function readEnv($: EngineInterface): Promise<Partial<Record<EnvNam
   const pairs: [EnvName, string | undefined][] = [
     ['HERDR_ENV', await $.env.get('HERDR_ENV')],
     ['HERDR_PANE_ID', await $.env.get('HERDR_PANE_ID')],
+    ['HC_TERMINAL_ID', await $.env.get('HC_TERMINAL_ID')],
+    ['PATH', await $.env.get('PATH')],
     ['OMH_ROLE', await $.env.get('OMH_ROLE')],
     ['OMH_DIR', await $.env.get('OMH_DIR')],
     ['OMH_CONFIG', await $.env.get('OMH_CONFIG')],

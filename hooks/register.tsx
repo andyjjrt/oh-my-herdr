@@ -32,7 +32,7 @@ const TOOLS = [
   {
     name: 'omh_dispatch',
     description: [
-      'Send one task of the current plan to a worker agent in a herdr pane, and return at once.',
+      'Send one task of the current plan to a worker agent (a herdr pane, a herdr-core terminal or a subagent), and return at once.',
       'Intent Gate: decide the task\'s intent and category first and say why in `rationale`. The worker\'s agent and model are chosen from the category by the config and current quota; leave `worker` and `profile` out unless the user asked for one.',
       'Never wait or poll after dispatching: you are woken with a results table when the wave settles, or at once when a worker is blocked, stalled or dies (with a diagnosis).',
       'Scouts: a task id `scout-<name>` with intent explore or research needs no plan — use them while exploring before plan.md, several at once, for long reads or external docs on cheaper models. They are read-only, have no wave or gate, and you are woken once all scouts are back; omh_collect closes each.',
@@ -151,8 +151,11 @@ async function serve(name: string, a: Args): Promise<Answer> {
   return { ok: false, text: `unknown tool ${name}` }
 }
 
-/** Outside herdr, or inside a worker pane this mod started, the mod does nothing. */
-const isDormant = (env: Awaited<ReturnType<typeof readEnv>>) => env.HERDR_ENV !== '1' || env.OMH_ROLE === 'worker'
+/**
+ * Outside herdr and herdr-core (a herdr pane, or an hc terminal such as a Herdr app pane), or inside
+ * a worker this mod started, the mod does nothing.
+ */
+const isDormant = (env: Awaited<ReturnType<typeof readEnv>>) => (env.HERDR_ENV !== '1' && !env.HC_TERMINAL_ID) || env.OMH_ROLE === 'worker'
 
 async function boot($: EngineInterface, cwd: string): Promise<boolean> {
   const env = await readEnv($)
@@ -165,6 +168,7 @@ async function boot($: EngineInterface, cwd: string): Promise<boolean> {
   rt.paths = new Paths(root, env.OMH_DIR || `${root}/.omh`)
   rt.watchPy = `${$.plugin.root}/skills/oh-my-herdr/scripts/omh-watch.py`
   rt.selfPane = env.HERDR_PANE_ID ?? null
+  rt.selfTerminal = env.HC_TERMINAL_ID ?? null
   await config().catch(() => undefined)
   return true
 }
@@ -177,7 +181,7 @@ export const register: Register = (on, options) => {
     if (!(await boot($, e.cwd))) return next(e)
     await Promise.all([
       ...TOOLS.map(t => $.tool.register({ name: t.name, description: t.description, inputSchema: t.inputSchema as unknown as Record<string, unknown>, isDeferred: false }).catch(() => undefined)),
-      $.command.register({ name: 'ulw', description: 'oh-my-herdr: ultrawork — plan, fan out to herdr workers, verify', argumentHint: '<goal>' }).catch(() => undefined),
+      $.command.register({ name: 'ulw', description: 'oh-my-herdr: ultrawork — plan, fan out to worker agents, verify', argumentHint: '<goal>' }).catch(() => undefined),
       $.command.register({ name: 'omh', description: 'oh-my-herdr: status | plan | approve | quota | check | board | teardown', argumentHint: 'status [full]|plan|approve|quota|check|board|teardown', immediate: true }).catch(() => undefined),
     ])
     // Reattaching watchers reads herdr and the disk: keep it out of the session's start.

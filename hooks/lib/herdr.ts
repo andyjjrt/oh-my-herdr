@@ -114,7 +114,9 @@ export async function closePane($: Engine, pane: string): Promise<void> {
   await herdr($, ['pane', 'close', pane])
 }
 
+/** A herdr notification; nothing outside herdr (hc has none: the lead's wake-up is the signal there). */
 export async function notify($: Engine, title: string, body: string, sound: 'none' | 'done' | 'request'): Promise<void> {
+  if ((await $.env.get('HERDR_ENV')) !== '1') return
   await $.process.run(['herdr', 'notification', 'show', title, '--body', body, '--sound', sound], { timeoutMs: 10_000 }).catch(() => undefined)
 }
 

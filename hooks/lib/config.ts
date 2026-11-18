@@ -39,9 +39,24 @@ export type QuotaConfig = {
   providers: Record<string, { enabled?: boolean; command?: string }>
 }
 
+/** Where pane workers run: herdr panes, or herdr-core (`hc`) terminals; `auto` picks herdr inside herdr. */
+export type BackendSetting = 'auto' | 'herdr' | 'hc'
+
+export type HcConfig = {
+  /** Let hc type notes about a worker into the lead (off: the mod's own wake-ups say it). */
+  notify: boolean
+  /**
+   * Inside the Herdr app: `tab` puts workers in omh tabs of the lead's space (by herdr.space /
+   * herdr.tab labels); `none` leaves them as sub-agents, in the agents list without a pane.
+   */
+  panes: 'tab' | 'none'
+}
+
 export type Config = {
   file: string
   dir: string
+  backend: BackendSetting
+  hc: HcConfig
   lead: string | null
   maxConcurrent: number
   /** Panes in one omh-workers tab before the next tab opens. */
@@ -101,6 +116,7 @@ function normalizeProviders(raw: unknown): QuotaConfig['providers'] {
 export function normalizeConfig(file: string, raw: unknown, builtinAgents: unknown): Config {
   const r = asRecord(raw)
   const q = asRecord(r.quota)
+  const h = asRecord(r.hc)
   const profiles: Record<string, Profile> = {}
   for (const [name, p] of Object.entries(asRecord(r.profiles))) {
     const pr = asRecord(p)
@@ -126,6 +142,8 @@ export function normalizeConfig(file: string, raw: unknown, builtinAgents: unkno
   return {
     file,
     dir: file.slice(0, file.lastIndexOf('/')),
+    backend: r.backend === 'herdr' || r.backend === 'hc' ? r.backend : 'auto',
+    hc: { notify: h.notify === true, panes: h.panes === 'none' ? 'none' : 'tab' },
     lead: typeof r.lead === 'string' ? r.lead : null,
     maxConcurrent: typeof r.max_concurrent === 'number' ? r.max_concurrent : 0,
     maxPanesPerTab: typeof r.max_panes_per_tab === 'number' && r.max_panes_per_tab >= 1 ? Math.floor(r.max_panes_per_tab) : 4,

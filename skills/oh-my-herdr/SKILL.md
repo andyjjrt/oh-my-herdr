@@ -21,7 +21,9 @@ The oh-my-herdr mod does the bookkeeping: it routes each task to a profile, watc
 
 ## 0. Preconditions
 
-The tools are `mcp__oh-my-herdr__omh_dispatch`, `omh_status`, `omh_collect`, `omh_spawn` and `omh_teardown`. If you don't have them, you are not running inside herdr (or you are a worker): tell the user to start `herdr` and run Claude Code in a pane, with this plugin installed.
+The tools are `mcp__oh-my-herdr__omh_dispatch`, `omh_status`, `omh_collect`, `omh_spawn` and `omh_teardown`. If you don't have them, you are not running inside herdr or herdr-core (or you are a worker): tell the user to run Claude Code in a herdr pane or a Herdr app pane, with this plugin installed.
+
+Workers run in herdr panes or in herdr-core (`hc`) terminals, as config.json's `backend` says. A worker whose pane reads `hc:t7` is hc terminal `t7`: read its screen with `hc read t7`, not `herdr`.
 
 `/omh check` (the user runs it, or you suggest it) shows the config in effect, the agents it needs, and current quota. If something is missing, point the user at `references/setup.md` — a misconfigured worker fails in its pane and wastes a wave.
 
@@ -103,4 +105,4 @@ Every brief tells the worker to write `.omh/runs/<run>/<task>/result.md` and rep
 - **A subagent worker is `blocked`** — it is waiting on a permission prompt in *this* session. Ask the user before approving anything that changes files or grants access.
 - **The worker went off-script** — check its brief (`.omh/runs/<run>/<task>/brief.md`); the fix is almost always a clearer brief, not a stronger model.
 
-Raw herdr commands, for when you need to look at a pane yourself: `references/herdr-cheatsheet.md`. For anything beyond it (pane layout, waits, read sources, safety rules), load the bundled `herdr` skill — herdr's own guide, shipped with this plugin.
+Raw herdr commands, for when you need to look at a herdr pane yourself (for an hc worker: `hc read <address>`, `hc get <address>`; `hc --skill` has the rest): `references/herdr-cheatsheet.md`. For anything beyond it (pane layout, waits, read sources, safety rules), load the bundled `herdr` skill — herdr's own guide, shipped with this plugin.

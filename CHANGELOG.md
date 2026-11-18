@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 — 2026-11-17
+## 0.4.0 — 2026-11-18
 
 ### Changed
 
@@ -26,9 +26,19 @@
 - The wake-up after `/omh approve` names the run's `plan.md`.
 - `/omh plan` previews the current run's `draft.md`, else its `plan.md`, else a leftover
   `.omh/plan.md` from an older version.
+- A free worker whose last status is `done` is reused like an `idle` one (hc keeps `done` until the
+  agent's next report).
 
 ### Added
 
+- **herdr-core backend.** Pane workers can run in [herdr-core](https://github.com/herdrdev/herdr-core)
+  (`hc`) terminals, and through them in the Herdr desktop app, besides herdr panes. config.json's
+  `backend` (`auto`, `herdr`, `hc`) picks where new workers start; `auto` keeps herdr inside herdr.
+  The mod also wakes up in an hc terminal (`HC_TERMINAL_ID`). See
+  [configuration](docs/configuration.md#where-workers-run-herdr-or-herdr-core).
+  - Status comes from the agent's own OSC 7501 reports, followed with `hc events`.
+  - In the Herdr app, workers open in omh tabs of the lead's space (`hc.panes`).
+  - `/omh check` shows the backend and whether the hc core is running.
 - **`pi` is a built-in agent** (`"launch": "herdr-kind", "kind": "pi"`), so profiles can use
   `"agent": "pi"` (or `"kind": "pi"`) without an `agents` entry.
 - **`status.json` has a `stage` field** with the value `draft`, `approved` or `running`. The file is

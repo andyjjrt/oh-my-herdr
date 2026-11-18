@@ -1,6 +1,6 @@
 // Why a worker stopped without a clean result. Pure: screen text + rules in, verdict out.
 //
-// herdr's idle/done/blocked are read off the screen and can be wrong; this turns the worker's last
+// herdr's idle/done/blocked are read off the screen and can be wrong (hc's are the agent's own reports); this turns the worker's last
 // screen, the quota snapshot and the result file into one verdict the lead reads on waking.
 // Rules live in agents.json under each agent's "diagnose" (verdict → regex list), so they grow
 // as new cases turn up; the defaults below cover what has been seen so far.
@@ -45,7 +45,7 @@ export const DEFAULT_RULES: Record<string, DiagnoseRules> = {
 const HINTS: Record<OmhVerdict, string> = {
   'finished-late': 'The result arrived after the grace period; collect and verify it as usual.',
   'quota-exhausted': 'Its subscription is out of quota: dispatch the task again without naming a worker so routing skips that provider, or wait for the reset.',
-  'permission-prompt': 'It is waiting on a dialog. Read it (`herdr agent read <name>`; a subagent asks in this session) and ask the user before answering anything that changes files or permissions.',
+  'permission-prompt': 'It is waiting on a dialog. Read it (`herdr agent read <name>` in herdr, `hc read <address>` in herdr-core; a subagent asks in this session) and ask the user before answering anything that changes files or permissions.',
   'config-error': 'The agent or model is misconfigured (login, model id, API key). Tell the user what to fix; re-dispatching will fail the same way.',
   crashed: 'The agent crashed. Read the pane, then spawn a fresh worker for the task.',
   interrupted: 'The agent was interrupted (by the user or a keypress). Ask before re-dispatching.',
