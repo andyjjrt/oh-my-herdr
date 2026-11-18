@@ -12,7 +12,7 @@ export type BackendKind = 'herdr' | 'hc'
 /** Where new workers start, or why none can. Pure. */
 export function resolveBackend(setting: BackendSetting, env: { inHerdr: boolean; inHc: boolean }): { kind: BackendKind } | { error: string } {
   if (setting === 'hc') return { kind: 'hc' }
-  if (setting === 'herdr') return env.inHerdr ? { kind: 'herdr' } : { error: 'config "backend": "herdr" needs the lead inside herdr (HERDR_ENV=1); set "backend" to "hc" or "auto"' }
+  if (setting === 'herdr') return env.inHerdr ? { kind: 'herdr' } : { error: 'backend "herdr" needs the lead inside herdr (HERDR_ENV=1); set the Worker backend option (or config.json "backend") to "hc" or "auto"' }
   return { kind: env.inHerdr ? 'herdr' : 'hc' }
 }
 

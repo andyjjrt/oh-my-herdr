@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.1 — 2026-11-18
+
+### Added
+
+- **Worker backend is a plugin option.** `/plugin` → oh-my-herdr → configure now shows **Worker
+  backend** (`auto`, `herdr`, `hc`), so herdr-core can be picked without editing config.json. A
+  `backend` other than `auto` in config.json still overrides it. `/omh check` shows the backend in
+  force.
+
+### Changed
+
+- **Explore subagents run on haiku by default.** The skill now has the lead pass `model: "haiku"`
+  when it calls the Agent tool with `subagent_type: "Explore"`, the same model as the `sub-explore`
+  profile; `"sonnet"` only when the question needs judgment or the user asked for another model.
+
 ## 0.4.0 — 2026-11-18
 
 ### Changed

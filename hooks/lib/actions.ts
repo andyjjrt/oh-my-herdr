@@ -3,7 +3,7 @@
 
 
 import type { OmhWorker } from '../../types'
-import { configProblems, isSubagentProfile, type Config } from './config'
+import { type BackendSetting, configProblems, isSubagentProfile, type Config } from './config'
 import { diagnose, excerpt } from './diagnose'
 import { currentRunId, hasText, openRunId, listWorkers, readGates, readJson, remove, writeJson, type Closing, type DispatchFile, type WorkerFile } from './files'
 import { agentStatus, closePane, paneExists, promptWorker, readCommand, readScreen, resolveBackend, type BackendKind } from './backend'
@@ -169,9 +169,12 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
   return { worker, warnings }
 }
 
-/** Where new pane workers start, from config.json's "backend" and where the lead runs. */
+/** The backend setting in force: config.json's "backend" unless it is auto, else the plugin option. */
+export const backendSettingOf = (cfg: Config): BackendSetting => (cfg.backend !== 'auto' ? cfg.backend : rt.options.backend)
+
+/** Where new pane workers start, from the backend setting and where the lead runs. */
 export async function backendOf(cfg: Config): Promise<{ kind: BackendKind } | { error: string }> {
-  return resolveBackend(cfg.backend, { inHerdr: (await host().env.get('HERDR_ENV')) === '1', inHc: rt.selfTerminal !== null })
+  return resolveBackend(backendSettingOf(cfg), { inHerdr: (await host().env.get('HERDR_ENV')) === '1', inHc: rt.selfTerminal !== null })
 }
 
 /**
@@ -906,7 +909,7 @@ export async function check(): Promise<Answer> {
     return fail(['oh-my-herdr check: the config did not load.', '', table(['Check', 'Result'], [...env, ['config', `⛔ ${(err as Error).message}`]])].join('\n'))
   }
   const kind = await backendOf(cfg)
-  env.push(['backend', 'error' in kind ? `⛔ ${kind.error}` : `✅ ${kind.kind}${cfg.backend === 'auto' ? ' (auto)' : ''}`])
+  env.push(['backend', 'error' in kind ? `⛔ ${kind.error}` : `✅ ${kind.kind}${backendSettingOf(cfg) === 'auto' ? ' (auto)' : ''}`])
   const usesHc = !('error' in kind) && kind.kind === 'hc'
   for (const bin of [usesHc ? 'hc' : 'herdr', 'python3', 'git']) env.push([bin, (await which(bin)) ? '✅ ok' : '⛔ missing'])
   if (usesHc) {

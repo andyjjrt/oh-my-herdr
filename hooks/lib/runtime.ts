@@ -7,7 +7,7 @@ import type { PluginOptions } from 'claude-code'
 import type { Engine } from './engine'
 
 import type { OmhDiagnosis, OmhQuota, OmhRunView, OmhWorker } from '../../types'
-import { type Config, loadConfig } from './config'
+import { type BackendSetting, type Config, loadConfig } from './config'
 import { diagnose, excerpt } from './diagnose'
 import { appendLine, currentRunId, hasText, openRunId, listWorkers, Paths, readGates, readJson, remove, type Closing, type DispatchFile, writeJson } from './files'
 import { agentStatus, readScreen, watchArgv } from './backend'
@@ -22,6 +22,8 @@ import { alertText, type ScoutRow, scoutsText, settleText } from './text'
 export type Options = {
   /** Where the run's progress shows: the mod's status line, a row above the prompt, or neither. */
   display: Display
+  /** Where new pane workers start; a non-auto config.json "backend" overrides it. */
+  backend: BackendSetting
   wakeOnSettle: boolean
   notifyHuman: boolean
   autoContinue: boolean
@@ -33,6 +35,7 @@ export function optionsOf(o: PluginOptions): Options {
   const b = (k: string, d: boolean) => (typeof o[k] === 'boolean' ? (o[k] as boolean) : d)
   return {
     display: displayOf(o.display),
+    backend: o.backend === 'herdr' || o.backend === 'hc' ? o.backend : 'auto',
     wakeOnSettle: b('wakeOnSettle', true),
     notifyHuman: b('notifyHuman', true),
     autoContinue: b('autoContinue', false),

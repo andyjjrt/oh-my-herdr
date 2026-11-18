@@ -4,7 +4,9 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { resolveBackend, watchArgv } from '../hooks/lib/backend'
+import { backendSettingOf } from '../hooks/lib/actions'
 import { normalizeConfig } from '../hooks/lib/config'
+import { optionsOf, rt } from '../hooks/lib/runtime'
 import { hcAddress, hcPane, isHcPane, pathKey, runArgs, statusOfTerminal, tabId } from '../hooks/lib/hc'
 
 describe('hc: pure parts', () => {
@@ -57,6 +59,20 @@ describe('hc: pure parts', () => {
     expect(c.backend).toBe('hc')
     expect(c.hc).toEqual({ notify: true, panes: 'none' })
     expect(normalizeConfig('/c.json', { backend: 'tmux' }, {}).backend).toBe('auto')
+  })
+
+  test('backend: the plugin option applies unless config.json names one', () => {
+    const saved = rt.options
+    try {
+      expect(optionsOf({}).backend).toBe('auto')
+      expect(optionsOf({ backend: 'tmux' }).backend).toBe('auto')
+      rt.options = optionsOf({ backend: 'hc' })
+      expect(backendSettingOf(normalizeConfig('/c.json', {}, {}))).toBe('hc')
+      expect(backendSettingOf(normalizeConfig('/c.json', { backend: 'auto' }, {}))).toBe('hc')
+      expect(backendSettingOf(normalizeConfig('/c.json', { backend: 'herdr' }, {}))).toBe('herdr')
+    } finally {
+      rt.options = saved
+    }
   })
 })
 

@@ -87,7 +87,9 @@ The built-in config mixes them:
 ## Where workers run: herdr or herdr-core
 
 Pane workers run either in **herdr** panes or in **herdr-core** (`hc`) terminals, the core that the
-[Herdr desktop app](https://github.com/herdrdev/herdr-app) is a window on. `backend` picks:
+[Herdr desktop app](https://github.com/herdrdev/herdr-app) is a window on. The plugin option
+**Worker backend** (`/plugin` → oh-my-herdr → configure) picks, for every project; a `backend` other
+than `auto` in config.json overrides it for that config:
 
 ```jsonc
 {

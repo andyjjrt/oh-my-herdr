@@ -37,8 +37,8 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
 
    | | Claude Code subagents | herdr scouts |
    | --- | --- | --- |
-   | How | Agent tool, `subagent_type: "Explore"` (or `"Plan"` for a design question). Launch them **in one message** so they run at once, each owning a different area | `omh_dispatch` with task id `scout-<name>` and intent `explore` (or `research` → `librarian`). No plan needed |
-   | Runs on | this session's model, inside your turn | a routed model: in a worker pane, or as a subagent the mod starts and tracks (`sub-*` profiles) |
+   | How | Agent tool, `subagent_type: "Explore"` with `model: "haiku"` (or `"Plan"` for a design question). Launch them **in one message** so they run at once, each owning a different area | `omh_dispatch` with task id `scout-<name>` and intent `explore` (or `research` → `librarian`). No plan needed |
+   | Runs on | haiku for Explore: always pass `model: "haiku"` unless the user asked for another model or the question needs judgment, not finding (then `"sonnet"`). Inside your turn | a routed model: in a worker pane, or as a subagent the mod starts and tracks (`sub-*` profiles) |
    | Best for | quick look-ups: where is X, how does Y flow | long reads, a whole subsystem, external docs |
    | Then | results come back in the same turn | **end your turn**; you are woken once every scout is back, then `omh_collect` each (that closes it and frees the worker; `omh_status` `abandon` closes one that brought nothing) |
 

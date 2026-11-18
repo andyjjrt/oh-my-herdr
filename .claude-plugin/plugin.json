@@ -1,6 +1,6 @@
 {
   "name": "oh-my-herdr",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "OmO-style multi-agent orchestration on herdr: Claude Code leads, worker agents run in herdr panes.",
   "author": {
     "name": "andyjjrt"
@@ -17,6 +17,17 @@
         "statusline",
         "panel",
         "off"
+      ]
+    },
+    "backend": {
+      "type": "string",
+      "title": "Worker backend",
+      "description": "Where new pane workers start. auto: herdr panes when the lead is in herdr, herdr-core (hc) terminals otherwise. herdr: herdr panes only. hc: hc terminals (the Herdr app's core), wherever the lead runs. A non-auto \"backend\" in config.json overrides this.",
+      "default": "auto",
+      "options": [
+        "auto",
+        "herdr",
+        "hc"
       ]
     },
     "wakeOnSettle": {
