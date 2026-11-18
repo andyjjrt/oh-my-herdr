@@ -4,7 +4,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { approvePlan, check, closeTask, collect, dispatch, draftPlan, passGate, planFile, quotaReport, spawn, status, teardown, togglePlanView, writePlan, type Answer } from './lib/actions'
+import { approvePlan, check, closeTask, collect, dispatch, draftPlan, passGate, planFile, quotaReport, recheckTask, spawn, status, teardown, togglePlanView, writePlan, type Answer } from './lib/actions'
 import { BOARD_ID, boardView } from './lib/board'
 import { bind, readEnv } from './lib/engine'
 import { Paths } from './lib/files'
@@ -59,11 +59,12 @@ const TOOLS = [
       'The run\'s plan and progress. action "show": waves, tasks, workers. "draft": write the plan in prose (goal, findings with file:line, approach, tasks with acceptance checks, risks, open questions) as the run\'s draft.md; give "name" to start a run for new work (.omh/runs/<date>-<name>/), leave it out to revise the current run\'s plan. Then summarise it for the user and end your turn — /omh approve makes it the run\'s plan.md.',
       '"plan": only after plan.md is approved, save the current run\'s plan.json derived from it (goal; waves with id, gate and tasks; each task id, title, intent, category, owns[], deps[]); tasks in one wave must not own the same files, and category is a routing name from the config, not the intent. A rejected plan can be fixed and sent again; a different plan.md needs a new draft and approval.',
       '"verified" / "abandon": close a task with a one-line `quality` note on how good the result was ("abandon" also closes a scout that brought nothing back). "gate": mark a wave\'s gate passed once all its tasks are closed; the next wave cannot be dispatched before that.',
+      '"recheck": re-read the live status of the worker holding `task` and correct its phase, when an alert (stalled, idle without result) looks wrong because the worker is in fact working or has reported.',
     ].join(' '),
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['show', 'draft', 'plan', 'verified', 'abandon', 'gate'] },
+        action: { type: 'string', enum: ['show', 'draft', 'plan', 'verified', 'abandon', 'gate', 'recheck'] },
         markdown: { type: 'string', description: 'For "draft": the whole plan, as markdown' },
         name: { type: 'string', description: 'For "draft": a short slug naming new work, which starts a new run (.omh/runs/<date>-<name>/). Leave it out to revise the current run\'s plan.' },
         plan: { type: 'object', description: 'For "plan": { goal, waves: [{ id, gate, tasks: [{ id, title, intent, category, owns, deps }] }] }' },
@@ -128,6 +129,8 @@ async function serve(name: string, a: Args): Promise<Answer> {
           return closeTask(s(a.task) ?? '', s(a.quality) ?? '', 'verified')
         case 'abandon':
           return closeTask(s(a.task) ?? '', s(a.quality) ?? '', 'abandoned')
+        case 'recheck':
+          return recheckTask(s(a.task) ?? '')
         case 'gate':
           return typeof a.wave === 'number' ? passGate(a.wave, s(a.note)) : { ok: false, text: 'gate needs "wave"' }
         default:

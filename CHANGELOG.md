@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A worker that started at once is no longer called stalled.** The dispatch was recorded only
+  after the prompt call returned, so a `working` reported meanwhile (pi on hc does this within a
+  second) was dropped, and the watcher never repeats a status. The dispatch is now recorded first,
+  and before a stall alert the mod asks the pane for its live status.
+- **Stalled and idle-without-result tasks recover.** A stalled worker that goes idle with its
+  `result.md` finishes, and an `idle-no-result` worker that works again, or whose report lands
+  late, returns to running or finished instead of keeping the alert.
+
+### Added
+
+- **`omh_status` action `recheck`.** Re-reads the live status of the worker holding a task and
+  corrects its phase, for an alert the lead thinks is wrong.
+
 ## 0.4.1 — 2026-11-18
 
 ### Added

@@ -252,6 +252,35 @@ describe('hc: through the mod', () => {
     expect(hc.runs.some(a => isHc(a, 'run'))).toBe(false)
   })
 
+  test('a `working` the watcher never repeats is not a stall: the pane is asked before alerting', async ($, on) => {
+    const mem: Mem = new Map([
+      ['/work/.omh/agents/old.json', JSON.stringify({ name: 'old', category: 'explore', profile: 'claude-sonnet', family: 'claude', agent: 'claude', pane: 'hc:t5', cwd: '/work', run: null, task: null, task_dir: null })],
+    ])
+    disk(on, mem)
+    // hc reports `working` once, right as the prompt is sent; the watcher (hcMock) only ever said idle.
+    let state = 'done'
+    hcMock(on, argv => {
+      if (isHc(argv, 'get') && argv.includes('t5')) return json({ address: 't5', state: 'live', status: { app: 'claude-code', state } })
+      if (isHc(argv, 'send')) {
+        state = 'working'
+        return json({ started: true })
+      }
+      return undefined
+    })
+    const sent: string[] = []
+    on('prompt.submit', (_$: any, e: any) => {
+      sent.push(e.text)
+      return { text: e.text }
+    })
+    const { clock } = await lead($, on, { HC_TERMINAL_ID: 't1' })
+    await $.tool.call({ tool: 'mcp__oh-my-herdr__omh_dispatch', task: 'scout-auth', intent: 'explore', rationale: 'look-up', brief: 'Find the session check.' } as never)
+    await clock.advance(120_000)
+    expect(sent.join('\n')).not.toContain('stalled')
+    expect(JSON.parse(mem.get('/work/.omh/runs/_scout/scout-auth/dispatch.json')!).outcome).toBeNull()
+    const show = String((await $.tool.call({ tool: 'mcp__oh-my-herdr__omh_status', action: 'recheck', task: 'scout-auth' } as never) as any).result)
+    expect(show).toContain('live status working; phase stays running')
+  })
+
   test('backend "herdr" outside herdr refuses to spawn and says why', async ($, on) => {
     const mem: Mem = new Map([['/work/.omh/config.json', JSON.stringify({ ...CONFIG, backend: 'herdr' })]])
     disk(on, mem)

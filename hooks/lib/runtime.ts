@@ -131,13 +131,57 @@ export function feed(name: string, event: SettleEvent): Promise<void> {
   return serial(name, () => apply(name, event))
 }
 
+/** What the worker's pane (or subagent listing) says now, not what the watcher last heard. */
+async function liveStatus(w: OmhWorker): Promise<string> {
+  if (isSubagentWorker(w)) {
+    const listed = await host().agent.list().catch(() => null)
+    return listed === null ? 'unknown' : settleStatusOf(listed.find(a => a.id === subagentIdOf(w))?.status)
+  }
+  return agentStatus(host(), w.pane).catch(() => 'unknown')
+}
+
+/**
+ * Re-read a worker's live status and feed it, then a tick: corrects a phase built on a missed
+ * transition (a stall that is working, a report that landed unnoticed). Returns the worker after.
+ */
+export async function recheck(name: string): Promise<{ before: OmhWorker; after: OmhWorker; live: string } | null> {
+  let out: { before: OmhWorker; after: OmhWorker; live: string } | null = null
+  await serial(name, async () => {
+    const before = (await workers())[name]
+    if (!before) return
+    const live = await liveStatus(before)
+    const now = await host().clock.now()
+    // A subagent's `done` comes with its answer by turn.complete; the listing alone is not its end.
+    if (live !== 'unknown' && live !== 'none' && !(isSubagentWorker(before) && live === 'done')) await apply(name, { kind: 'status', status: live, at: now })
+    await apply(name, { kind: 'tick', at: now })
+    const after = (await workers())[name] ?? before
+    out = { before, after, live }
+  })
+  return out
+}
+
 async function apply(name: string, event: SettleEvent): Promise<void> {
   const $ = host()
   const w = (await workers())[name]
   if (!w) return
   const p = paths()
   const hasResult = w.task !== null && w.run !== null ? await hasText($, p.result(w.run, w.task)) : false
-  const { worker, effects } = step(w, event, { hasResult, stallMs: stallMsOf(rt.cfg, w.agent), graceMs: GRACE_MS })
+  const facts = { hasResult, stallMs: stallMsOf(rt.cfg, w.agent), graceMs: GRACE_MS }
+  let cur = w
+  const effects: SettleEffect[] = []
+  if (event.kind === 'tick' && cur.phase === 'dispatched' && !cur.sawWorking && cur.dispatchedAt !== null && event.at - cur.dispatchedAt >= facts.stallMs) {
+    // The watcher reports changes only: a `working` that came before the dispatch was recorded is
+    // never repeated. Ask the pane itself before calling it a stall.
+    const live = await liveStatus(cur)
+    if (live === 'working' || live === 'blocked') {
+      const s = step(cur, { kind: 'status', at: event.at, status: live }, facts)
+      cur = s.worker
+      effects.push(...s.effects)
+    }
+  }
+  const s = step(cur, event, facts)
+  const worker = s.worker
+  effects.push(...s.effects)
   await setWorker(worker)
   for (const effect of effects) await perform(worker, effect)
   if (effects.length > 0 || w.phase !== worker.phase) await refreshRun()
@@ -227,7 +271,13 @@ async function onAlert(w: OmhWorker, phase: 'blocked' | 'stalled' | 'idle-no-res
       `stall:${w.name}`,
       $.clock.after(stallMsOf(rt.cfg, w.agent), () => {
         void serial(w.name, async () => {
-          const again = (await workers())[w.name]
+          let again = (await workers())[w.name]
+          if (again?.phase !== 'stalled') return
+          const live = await liveStatus(again)
+          if (live === 'working' || live === 'blocked') {
+            await apply(w.name, { kind: 'status', status: live, at: await host().clock.now() })
+            again = (await workers())[w.name]
+          }
           if (again?.phase === 'stalled') await raise(again, 'stalled', await diagnoseWorker(again))
         })
       }),

@@ -27,6 +27,7 @@ import {
   loadPlan,
   onSubagentEnd,
   paths,
+  recheck,
   recordHistory,
   refreshQuota,
   refreshRun,
@@ -503,12 +504,22 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
   } else {
     const wf = await readJson<WorkerFile>($, p.agent(worker.name))
     if (wf) await writeJson($, p.agent(worker.name), { ...wf, run, task: task.id, task_dir: dir, category })
+    // Recorded before the prompt: the agent can report `working` while the prompt call is still
+    // returning, and the watcher never repeats it. A `working` fed to an idle worker is dropped.
+    const idle = (await workers())[worker.name] ?? worker
+    await feed(worker.name, { kind: 'dispatch', at: now, task: task.id, run })
     try {
       await promptWorker($, worker, instruction)
     } catch (err) {
+      rt.timers.get(`tick:${worker.name}`)?.cancel()
+      rt.timers.delete(`tick:${worker.name}`)
+      await setWorker(idle)
+      if (wf) await writeJson($, p.agent(worker.name), wf)
+      if (prev) await writeJson($, p.dispatch(run, task.id), prev)
+      else await remove($, p.dispatch(run, task.id))
+      await refreshRun()
       return fail(`prompt failed for '${worker.name}': ${(err as Error).message}${err instanceof HerdrError && err.code === 'agent_blocked' ? ` — it is waiting on a dialog; read it with \`${readCommand(worker)}\` and ask the user` : ''}`)
     }
-    await feed(worker.name, { kind: 'dispatch', at: now, task: task.id, run })
   }
   await refreshRun()
   return ok(
@@ -774,6 +785,25 @@ export async function closeTask(taskId: string, quality: string, how: 'verified'
   const wave = view?.waves.find(w => w.tasks.some(t => t.id === taskId))
   const open = wave?.tasks.filter(t => !DONE.has(t.status)).map(t => t.id) ?? []
   return ok(`${taskId} marked ${how}. ${open.length > 0 ? `Wave ${wave?.id} still open: ${open.join(', ')}.` : `Every task in wave ${wave?.id} is closed: run its gate (“${wave?.gate}”) and mark it with omh_status action "gate".`}`)
+}
+
+/** Re-read the live status of the worker holding a task and correct its phase: for an alert the lead thinks is wrong. */
+export async function recheckTask(taskId: string): Promise<Answer> {
+  const $ = host()
+  const run = isScout(taskId) ? SCOUT_RUN : await currentRunId($, paths())
+  if (run === null) return fail('no run in progress')
+  const holder = Object.values(await workers()).find(w => w.run === run && w.task === taskId)
+  if (!holder) return fail(`no worker holds task ${taskId}`)
+  const r = await recheck(holder.name)
+  if (!r) return fail(`worker '${holder.name}' is no longer recorded`)
+  await refreshRun()
+  const { before, after, live } = r
+  const changed = before.phase !== after.phase
+  return ok(
+    `${taskId} → ${holder.name}: live status ${live}; phase ${changed ? `${before.phase} → ${after.phase}` : `stays ${after.phase}`}.` +
+      (changed && after.phase === 'running' ? ' The alert was a missed transition: the worker is running again; you will be woken when the wave settles.' : '') +
+      (!changed && (after.phase === 'stalled' || after.phase === 'idle-no-result') ? ` Read its screen with \`${readCommand(holder)}\` before re-dispatching or abandoning.` : ''),
+  )
 }
 
 export async function passGate(waveId: number, note: string | undefined): Promise<Answer> {

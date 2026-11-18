@@ -114,6 +114,32 @@ describe('settle', () => {
     expect(step(w, { kind: 'status', at: 2, status: 'gone' }, { ...FACTS, hasResult: true }).worker.phase).toBe('finished')
     expect(step(base(), { kind: 'status', at: 2, status: 'gone' }, FACTS).effects).toEqual([])
   })
+
+  test('a stalled worker whose `working` was missed finishes on idle with its report', () => {
+    const d = step(base(), { kind: 'dispatch', at: 0, task: 'T1', run: 'r' }, FACTS).worker
+    const stalled = step(d, { kind: 'tick', at: 31_000 }, FACTS).worker
+    expect(stalled.phase).toBe('stalled')
+    expect(step(stalled, { kind: 'status', at: 40_000, status: 'idle' }, FACTS).worker.phase).toBe('stalled')
+    const r = step(stalled, { kind: 'status', at: 40_000, status: 'idle' }, { ...FACTS, hasResult: true })
+    expect(r.worker.phase).toBe('finished')
+    expect(r.effects).toEqual([{ type: 'recovered' }, { type: 'settled', phase: 'finished' }])
+  })
+
+  test('idle-no-result recovers when the worker works again or its report lands', () => {
+    let w = step(base(), { kind: 'dispatch', at: 0, task: 'T1', run: 'r' }, FACTS).worker
+    w = step(w, { kind: 'status', at: 1, status: 'working' }, FACTS).worker
+    w = step(w, { kind: 'status', at: 2, status: 'idle' }, FACTS).worker
+    w = step(w, { kind: 'tick', at: 50_000 }, FACTS).worker
+    expect(w.phase).toBe('idle-no-result')
+    const back = step(w, { kind: 'status', at: 60_000, status: 'working' }, FACTS)
+    expect(back.worker.phase).toBe('running')
+    expect(back.effects).toEqual([{ type: 'recovered' }])
+    const late = step(w, { kind: 'tick', at: 60_000 }, { ...FACTS, hasResult: true })
+    expect(late.worker.phase).toBe('finished')
+    expect(late.effects).toEqual([{ type: 'recovered' }, { type: 'settled', phase: 'finished' }])
+    // Without a task (closed by the lead) nothing comes back.
+    expect(step({ ...w, task: null }, { kind: 'status', at: 60_000, status: 'working' }, FACTS).worker.phase).toBe('idle-no-result')
+  })
 })
 
 describe('route', () => {

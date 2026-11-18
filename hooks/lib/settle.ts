@@ -88,6 +88,19 @@ export function step(worker: OmhWorker, event: SettleEvent, facts: SettleFacts):
       return { worker: w, effects }
     }
 
+    if (w.phase === 'idle-no-result' && w.task !== null) {
+      // Called idle too early: it is back at the task, or its report landed after all.
+      if (st === 'working') {
+        w.sawWorking = true
+        to('running')
+        effects.push({ type: 'recovered' })
+      } else if ((st === 'idle' || st === 'done') && facts.hasResult) {
+        finish()
+        effects.unshift({ type: 'recovered' })
+      }
+      return { worker: w, effects }
+    }
+
     if (!ACTIVE.has(w.phase)) {
       return { worker: w, effects }
     }
@@ -113,7 +126,12 @@ export function step(worker: OmhWorker, event: SettleEvent, facts: SettleFacts):
 
     if (st === 'idle' || st === 'done') {
       if (!w.sawWorking) {
-        // The idle right after a prompt; the stall timer decides if it never starts.
+        // A stalled worker whose `working` was missed, now idle with its report: it did the task.
+        if (w.phase === 'stalled' && facts.hasResult) {
+          finish()
+          effects.unshift({ type: 'recovered' })
+        }
+        // Otherwise the idle right after a prompt; the stall timer decides if it never starts.
         return { worker: w, effects }
       }
       if (facts.hasResult) {
@@ -133,6 +151,11 @@ export function step(worker: OmhWorker, event: SettleEvent, facts: SettleFacts):
   }
 
   // tick
+  if (facts.hasResult && w.phase === 'idle-no-result' && w.task !== null) {
+    finish()
+    effects.unshift({ type: 'recovered' })
+    return { worker: w, effects }
+  }
   if (facts.hasResult && ACTIVE.has(w.phase) && w.phase !== 'blocked') {
     // result.md can land after the grace period, or while herdr missed the transition.
     if (w.phase !== 'dispatched' || w.sawWorking) {

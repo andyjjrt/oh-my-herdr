@@ -107,6 +107,10 @@ stateDiagram-v2
   running --> checking: idle or done, no result.md
   checking --> finished: result.md arrives
   checking --> idle_no_result: grace period over
+  stalled --> running: working (live status rechecked)
+  stalled --> finished: idle or done, result.md
+  idle_no_result --> running: working again
+  idle_no_result --> finished: result.md arrives
   running --> gone: pane closed / subagent died
   finished --> dispatched: next task (pane workers)
 ```
@@ -120,6 +124,8 @@ stateDiagram-v2
 
 `blocked`, `stalled`, `idle_no_result` and `gone` wake the lead at once with a diagnosis
 (`quota-exhausted`, `permission-prompt`, `config-error`, `crashed`, `interrupted`, `unknown`).
+The watcher reports changes only, so before calling a worker stalled the mod asks the pane for its
+live status; `omh_status` action `recheck` does the same on demand.
 
 ## Guards
 
