@@ -107,8 +107,11 @@ loads the same workflow.
 
 The bundled `herdr` skill is herdr's own guide to panes, tabs, workspaces and agents, copied
 unmodified from [herdrdev/herdr](https://github.com/herdrdev/herdr/tree/master/skills/herdr)
-(Apache-2.0; see [NOTICE.md](skills/herdr/NOTICE.md)). If you installed it separately, remove that
-copy so it doesn't load twice.
+(Apache-2.0; see [NOTICE.md](skills/herdr/NOTICE.md)). The bundled `herdr-core` skill is
+herdr-core's own pointer to `hc`, copied unmodified from
+[herdrdev/herdr-core](https://github.com/herdrdev/herdr-core/tree/master/skills/herdr-core)
+(Apache-2.0; see [NOTICE.md](skills/herdr-core/NOTICE.md)). If you installed either separately,
+remove that copy so it doesn't load twice.
 
 ## Troubleshooting
 
@@ -131,5 +134,6 @@ claude plugin test .
 
 ## License
 
-MIT; see [LICENSE](LICENSE). `skills/herdr/` comes from the herdr project and is Apache-2.0; see
-[skills/herdr/LICENSE](skills/herdr/LICENSE).
+MIT; see [LICENSE](LICENSE). `skills/herdr/` comes from the herdr project and `skills/herdr-core/`
+from the herdr-core project; both are Apache-2.0, see [skills/herdr/LICENSE](skills/herdr/LICENSE)
+and [skills/herdr-core/LICENSE](skills/herdr-core/LICENSE).

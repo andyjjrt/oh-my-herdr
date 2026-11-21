@@ -147,19 +147,26 @@ export function scoutsText(rows: readonly ScoutRow[]): string {
   ].join('\n')
 }
 
-export function ulwPrompt(goal: string): string {
+/** `subagents`: what the config lets the lead start through the Agent tool ([]: none; null: unknown). */
+export function ulwPrompt(goal: string, subagents: string[] | null = null): string {
+  const sub =
+    subagents === null
+      ? ['   - Claude Code subagents: several `Explore` (or `Plan`) agents via the Agent tool, launched in ONE message so they run at once, each owning a different area and returning file:line evidence. Best for quick look-ups; they come back within this turn.']
+      : subagents.length === 0
+        ? ['   - No Claude Code subagents: the config routes every category to external agents, so the Agent tool is refused. Fan out with scouts only.']
+        : [`   - Claude Code subagents via the Agent tool, only these (type · model, as the config routes them): ${subagents.join('; ')}. Launch them in ONE message so they run at once, each owning a different area and returning file:line evidence. Best for quick look-ups; they come back within this turn.`]
   return [
     `ulw — ultrawork with oh-my-herdr. Goal: ${goal.trim() || '(ask me what the goal is)'}`,
     '',
     'Run the oh-my-herdr loop with the `mcp__oh-my-herdr__*` tools:',
     '1. Explore enough to plan, in parallel. Read the entry points yourself, and fan the rest out — this ulw is my explicit request for helpers, so use them:',
-    '   - Claude Code subagents: several `Explore` (or `Plan`) agents via the Agent tool, launched in ONE message so they run at once, each owning a different area and returning file:line evidence. Best for quick look-ups; they come back within this turn.',
+    ...sub,
     '   - herdr scouts: `omh_dispatch` with a task id `scout-<name>`, intent `explore` or `research`, before any plan exists. They run read-only on routed (cheaper) models in worker panes; best for long reads and external docs. After dispatching them END YOUR TURN: you are woken when they are all back, then `omh_collect` each.',
     '2. Intent Gate: for every task decide its intent (explore, research, implement, fix, review, plan, write) and category.',
     '3. Draft the plan in prose with `omh_status` action `draft` and a short `name` for this work, which starts its run in .omh/runs/<date>-<name>/ (goal, findings with file:line, approach, tasks with acceptance checks, risks, open questions). Summarise it for me and END YOUR TURN: I read it and approve it with /omh approve, or ask for changes (draft again without `name`).',
     '4. Once approved, derive the waves from the run\'s plan.md with `omh_status` action `plan`: waves of tasks, each task with the files it owns and a category from the config (not the intent); a gate per wave.',
     '5. Dispatch the current wave with `omh_dispatch` (intent, category, a one-line rationale, the brief). Do not wait or poll: you will be woken when the wave settles or a worker needs you.',
-    '6. When woken: `omh_collect`, verify each result yourself, mark it `verified` or `abandon` with a one-line quality note, run the gate, mark it, then dispatch the next wave.',
+    '6. When woken: `omh_collect`, verify each result yourself, mark it `verified` or `abandon` with a one-line quality note, run the gate, mark it, then dispatch the next wave. Run test suites, builds and servers in a herdr pane (`herdr pane run`) or an hc terminal (`hc run`) rather than inside your Bash call, so I can watch them; then read the result.',
     '7. Finish with the full acceptance check, a short report, and `omh_teardown`.',
   ].join('\n')
 }

@@ -106,4 +106,15 @@ describe('/omh plan pane', () => {
     expect(seen).toEqual([PLAN])
     await ui.unmount()
   })
+
+  test('without prismantis, plan.md shows as plain text in the same pane', async ($, on) => {
+    disk(on)
+    engine(on)
+    await lead($, on)
+    const ui = await $.ui.mount(PANE)
+    const text = textOf(await ui.drawn())
+    expect(text).toContain('/work/.omh/plan.md')
+    expect(text).toContain('# Ship it')
+    await ui.unmount()
+  })
 })

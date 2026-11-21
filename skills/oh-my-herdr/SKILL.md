@@ -42,6 +42,8 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
    | Best for | quick look-ups: where is X, how does Y flow | long reads, a whole subsystem, external docs |
    | Then | results come back in the same turn | **end your turn**; you are woken once every scout is back, then `omh_collect` each (that closes it and frees the worker; `omh_status` `abandon` closes one that brought nothing) |
 
+   The mod holds your Agent calls to the subagent profiles the config routes to: other types are refused, other models replaced, and with external agents only every Agent call is refused, so use scouts. The `/ulw` prompt lists what you may start.
+
    Ask every helper for file:line evidence, and spot-check what you build the plan on. Scouts are read-only and own no files; anything that changes files waits for the approved plan. Exploring that needs the plan's own waves (e.g. a big audit whose result *is* the deliverable) can still be wave 1 of the plan.
 2. **Intent Gate.** For each task decide its *intent* and *category*:
 
@@ -74,6 +76,14 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
    - **Wave settled** — a table of every task's state. Continue at step 7.
    - **Worker blocked / stalled / idle without a result / gone** — with a diagnosis (`quota-exhausted`, `permission-prompt`, `config-error`, `crashed`, `interrupted`, or `unknown` with the screen). Act on it: re-dispatch the task without naming a worker when quota ran out; tell the user what to fix for a config error. **Never answer a worker's permission dialog that changes files, runs commands or grants access without asking the user.** If the screen shows the worker busy (or its report exists) despite a stalled / idle-without-result alert, call `omh_status` with `action: "recheck"` and the task: it re-reads the live status and corrects the task instead of re-dispatching it. Other workers keep running meanwhile.
 7. **Verify.** `omh_collect` each reported task. The report is a claim: run the tests/build yourself, read the diff, check the acceptance criteria. Then `omh_status` with `action: "verified"` and a one-line `quality` note on how good the result was (what held up, what you had to fix) — this builds the history used to judge profiles. A result you can't use: fix it with a follow-up dispatch of the same task (it records a retry), or `action: "abandon"` with a quality note.
+   **Run tests and checks in a terminal of their own, not inside your Bash call**: a test suite, a build, a dev server, the app itself. The user can watch it, it survives a timeout, and you read it when it is done:
+
+   | Lead runs in | Run | Read |
+   | --- | --- | --- |
+   | herdr (`HERDR_ENV=1`) | `herdr pane split <your pane> --direction down --no-focus` once, then `herdr pane run <pane> "npm test"` | `herdr pane wait-output <pane> --regex "passed\|failed" --timeout 600000`, then `herdr pane read <pane> --source recent-unwrapped --lines 120` |
+   | herdr-core (`HC_TERMINAL_ID`) | `hc run --name omh-test --cwd <root> -- npm test` (waits like a shell and returns its exit code); for a server, `hc run --bg --no-notify --name omh-dev -- npm run dev` | `hc wait <t>`, then `hc read <t>`; `hc kill <t>` when done |
+
+   Keep one terminal for checks and reuse it. A one-second check (`git diff --stat`, a single grep) stays in Bash.
 8. **Gate.** When every task of the wave is verified or abandoned, run the gate's check (typically a `reviewer` task in the next wave, plus the test suite) and `omh_status` with `action: "gate"`. The next wave can't be dispatched until then.
 9. **Finish.** All gates passed → final acceptance check, tell the user what changed, the evidence it works, and what's still open. Then `omh_teardown` unless they want the workers kept.
 

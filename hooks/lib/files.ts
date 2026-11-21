@@ -102,10 +102,6 @@ export class Paths {
   get legacyDraft() {
     return `${this.omh}/plan.md`
   }
-  /** The pane /omh plan opened beside the lead to preview plan.md. */
-  get planView() {
-    return `${this.omh}/plan-view.json`
-  }
   gates(run: string) {
     return `${this.run(run)}/gates.json`
   }

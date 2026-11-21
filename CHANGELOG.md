@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The lead's own subagents follow the config.** The lead's Agent tool calls are held to the
+  subagent profiles the categories route to: their types only, on their models (an `Explore` call
+  with no model no longer inherits the lead's opus). When the config routes only to external
+  agents, the lead's Agent calls are refused and it explores with scouts. `/ulw` names what the
+  lead may start.
+- **The `herdr-core` skill is bundled**, copied unmodified from herdrdev/herdr-core
+  (Apache-2.0; `skills/herdr-core/NOTICE.md`), beside the `herdr` skill.
+
+### Changed
+
+- **librarian starts on a haiku subagent** in the built-in config (`sub-haiku` → `go-fast` →
+  `go-deepseek`), like explore (`sub-explore`, Explore on haiku).
+- **The lead runs tests and checks in herdr or hc.** The skill and the `/ulw` prompt ask the lead
+  to run test suites, builds and servers in a herdr pane or an hc terminal instead of its own Bash
+  call, so you can watch them; the cheatsheet gains the `hc` commands.
+- **`/omh plan` always previews in a Claude Code pane beside the lead.** Without prismantis it
+  used to open a herdr pane running `leaf`, `glow`, `bat` or `less`, which failed with herdr-core
+  and outside herdr. Now the same pane shows plan.md as plain text; with prismantis it is still
+  drawn as markdown.
+
 ## 0.4.2 — 2026-11-19
 
 ### Fixed

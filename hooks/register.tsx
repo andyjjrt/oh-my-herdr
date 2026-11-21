@@ -4,18 +4,19 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { approvePlan, check, closeTask, collect, dispatch, draftPlan, passGate, planFile, quotaReport, recheckTask, spawn, status, teardown, togglePlanView, writePlan, type Answer } from './lib/actions'
+import { approvePlan, check, closeTask, collect, dispatch, draftPlan, passGate, planFile, quotaReport, recheckTask, spawn, status, teardown, writePlan, type Answer } from './lib/actions'
 import { BOARD_ID, boardView } from './lib/board'
 import { bind, readEnv } from './lib/engine'
 import { Paths } from './lib/files'
 import { ownerOf, relativeTo } from './lib/guards'
+import { agentCallRule, kindText, routedSubagents } from './lib/config'
 import { loadPlan, config, flushWake, onSubagentEnd, optionsOf, reconcile, refreshQuota, refreshRun, rt, workers } from './lib/runtime'
 import { subagentIdOf } from './lib/subagent'
 import { ACTIVE } from './lib/settle'
 import { statusText, ulwPrompt } from './lib/text'
 import { progressPanel, statusTail } from './lib/statusbar'
 import { compactCall, compactResult, OMH_TOOL, resultText } from './lib/toolrow'
-import { drawMarkdown, hasPrismantis, looksLikeMarkdown, splitCollected } from './lib/prismantis'
+import { drawMarkdown, looksLikeMarkdown, splitCollected } from './lib/prismantis'
 
 // The same refs as hooks/lib/engine.ts: a read must name a const of its own file, and a read made
 // while drawing subscribes the drawing to the value.
@@ -25,7 +26,7 @@ const QUOTA = atom({ plugin: 'oh-my-herdr', key: 'quota' } as const, {}, { shape
 const CONTINUE = atom({ plugin: 'oh-my-herdr', key: 'continueCount' } as const, 0)
 const BOARD_OPEN = atom({ plugin: 'oh-my-herdr', key: 'boardOpen' } as const, false)
 
-/** /omh plan's pane when prismantis draws it; without prismantis plan.md shows in a herdr pane instead. */
+/** /omh plan's pane beside the lead: plan.md drawn by prismantis when it is installed, as plain text otherwise. */
 const PLAN_ID = 'omh-plan'
 
 const TOOLS = [
@@ -228,7 +229,8 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'ulw' }, async ($, e, next) => {
     if (!live()) return next(e)
-    const text = ulwPrompt(e.args)
+    const cfg = await config().catch(() => null)
+    const text = ulwPrompt(e.args, cfg === null ? null : routedSubagents(cfg).map(kindText))
     // Submitting from inside the command's own dispatch is refused; do it once the command is done.
     $.clock.after(0, () => {
       $.prompt.submit({ text, asUser: true }).catch(err => $.ui.toast(`oh-my-herdr: /ulw could not start: ${(err as Error).message}`))
@@ -261,7 +263,6 @@ export const register: Register = (on, options) => {
         return { text: answer.text }
       }
       case 'plan': {
-        if (!(await hasPrismantis($ as never, 'terminal'))) return { text: (await togglePlanView()).text }
         if ((await $.ui.panes()).some((p: { id: string }) => p.id === PLAN_ID)) {
           await $.ui.close({ id: PLAN_ID })
           return { text: 'plan preview closed' }
@@ -294,7 +295,7 @@ export const register: Register = (on, options) => {
     return boardView(el, await read($, RUN), await read($, WORKERS), await read($, QUOTA), (e.viewport?.rows ?? 30) - 2) as never
   })
 
-  // plan.md drawn by prismantis, read fresh on every draw.
+  // plan.md, read fresh on every draw: drawn by prismantis, or as plain text without it.
   on('ui.render', { component: 'Pane', requestId: PLAN_ID }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e) as { Box: any; Text: any }
     const file = await planFile()
@@ -367,6 +368,17 @@ export const register: Register = (on, options) => {
   })
 
   // ---------------------------------------------------------------- guards
+
+  // The lead's own Agent calls are held to the subagents the config routes to: none at all when
+  // every category is an external agent, else only those types, on their models.
+  on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
+    if (!live()) return next(e)
+    const rule = agentCallRule(await config(), e as { subagent_type?: unknown; model?: unknown })
+    if (rule === null) return next(e)
+    if ('deny' in rule) return { deny: rule.deny }
+    const { model: _drop, ...rest } = e as typeof e & { model?: string }
+    return next((rule.model === undefined ? rest : { ...rest, model: rule.model }) as typeof e)
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'oh-my-herdr: the subagent guard failed; try again' }))
 
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
     if (!live() || rt.paths === null) return next(e)

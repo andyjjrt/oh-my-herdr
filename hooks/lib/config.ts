@@ -160,6 +160,47 @@ export function normalizeConfig(file: string, raw: unknown, builtinAgents: unkno
   }
 }
 
+/** A subagent the config routes some category to: its type and model (undefined: the lead's). */
+export type SubagentKind = { type: string; model: string | undefined }
+
+/** Every subagent kind the categories route to, in config order, each once. Pure. */
+export function routedSubagents(cfg: Config): SubagentKind[] {
+  const out: SubagentKind[] = []
+  for (const c of Object.values(cfg.categories)) {
+    for (const name of c.profiles) {
+      if (!isSubagentProfile(cfg, name)) continue
+      const p = cfg.profiles[name]!
+      const k = { type: p.subagentType ?? 'general-purpose', model: p.model }
+      if (!out.some(o => o.type === k.type && o.model === k.model)) out.push(k)
+    }
+  }
+  return out
+}
+
+export const kindText = (k: SubagentKind): string => `${k.type} · ${k.model ?? "the lead's model"}`
+
+/**
+ * The lead's own Agent tool call, held to the subagents the config routes to. Pure. With none, the
+ * user chose external agents only: refused, with scouts named instead. A type the config does not
+ * route to is refused; a model it does not list for that type becomes its first listed one.
+ */
+export function agentCallRule(cfg: Config, input: { subagent_type?: unknown; model?: unknown }): { deny: string } | { model: string | undefined } | null {
+  const kinds = routedSubagents(cfg)
+  if (kinds.length === 0) {
+    return {
+      deny: `oh-my-herdr: the config (${cfg.file}) routes no category to a subagent, only to external agents, so the lead starts no subagents. Explore with omh_dispatch scouts instead (task id \`scout-<name>\`, intent explore or research), or read it yourself. To allow subagents, add a subagent profile to a category.`,
+    }
+  }
+  const type = typeof input.subagent_type === 'string' && input.subagent_type !== '' ? input.subagent_type : 'general-purpose'
+  const models = kinds.filter(k => k.type === type).map(k => k.model)
+  if (models.length === 0) {
+    return { deny: `oh-my-herdr: subagent_type '${type}' is not one the config (${cfg.file}) routes to. Allowed: ${kinds.map(kindText).join('; ')}. Use one of those, or an omh_dispatch scout.` }
+  }
+  const asked = typeof input.model === 'string' && input.model !== '' ? input.model : undefined
+  if (models.includes(asked)) return null
+  return { model: models[0] }
+}
+
 /** Whether a profile runs as a Claude Code subagent of the lead rather than in a herdr pane. */
 export function isSubagentProfile(cfg: Config, profile: string): boolean {
   const p = cfg.profiles[profile]

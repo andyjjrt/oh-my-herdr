@@ -11,7 +11,6 @@ import { cell, table } from '../hooks/lib/md'
 import { isUsualPair, pickProfile } from '../hooks/lib/route'
 import { newWorker, step, type SettleFacts } from '../hooks/lib/settle'
 import { scoutsText, statusBrief, statusText, ulwPrompt } from '../hooks/lib/text'
-import { planViewerLine } from '../hooks/lib/actions'
 import { callSummary, firstLine, OMH_TOOL, resultText } from '../hooks/lib/toolrow'
 import { drawMarkdown, hasPrismantis, looksLikeMarkdown, splitCollected } from '../hooks/lib/prismantis'
 import { endStatusOf, isSubagentWorker, settleStatusOf, subagentIdOf, subagentPane, subagentScreen } from '../hooks/lib/subagent'
@@ -478,16 +477,11 @@ describe('scouts and ulw', () => {
     expect(text).toContain('`Explore`')
     expect(text).toContain('scout-<name>')
   })
-})
-
-describe('plan preview', () => {
-  test('tries leaf, glow, bat, then less, and quotes the path', () => {
-    const line = planViewerLine("/work/my repo/.omh/plan.md")
-    const order = ['leaf --watch', 'glow -p', 'bat --paging=always', 'less -R'].map(x => line.indexOf(x))
-    expect(order.every(i => i >= 0)).toBe(true)
-    expect([...order].sort((a, b) => a - b)).toEqual(order)
-    expect(line).toContain("'/work/my repo/.omh/plan.md'")
-    expect(line.endsWith('exit')).toBe(true)
+  test('the ulw prompt names only the subagents the config allows, or none', () => {
+    expect(ulwPrompt('o', ['Explore · haiku'])).toContain('only these (type · model, as the config routes them): Explore · haiku')
+    const none = ulwPrompt('o', [])
+    expect(none).toContain('No Claude Code subagents')
+    expect(none).toContain('scout-<name>')
   })
 })
 

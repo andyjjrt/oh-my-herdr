@@ -49,7 +49,7 @@
     "deep":               ["go-deepseek", "claude-sonnet", "sub-sonnet"],
     "visual-engineering": ["claude-sonnet", "sub-sonnet", "go-deepseek"],
     "explore":            ["sub-explore", "go-fast", "go-deepseek"],
-    "librarian":          ["go-fast", "sub-haiku", "go-deepseek"],
+    "librarian":          ["sub-haiku", "go-fast", "go-deepseek"],
     "quick":              ["sub-haiku", "go-fast", "go-deepseek"],
     "writing":            ["go-deepseek", "sub-sonnet", "claude-sonnet"],
     "reviewer":           ["claude-review", "sub-review", "go-deepseek"]

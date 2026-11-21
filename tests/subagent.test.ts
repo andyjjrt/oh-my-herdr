@@ -205,3 +205,39 @@ describe('file ownership with a subagent worker', () => {
     expect(String(((await edit('ag9')) as any).deny)).toContain('belongs to task T1')
   })
 })
+
+describe("the lead's own Agent calls", () => {
+  /** The lead, and every Agent call that got past the mod (its model), or the refusal. */
+  async function calls($: any, on: any, config: unknown, inputs: Record<string, unknown>[]) {
+    const mem: Mem = new Map(config === undefined ? [] : [['/home/u/.config/oh-my-herdr/config.json', JSON.stringify(config)]])
+    disk(on, mem)
+    on('tool.call', (_$: any, e: any) => ({ result: `model=${e.model ?? '-'}` }))
+    await lead($, on)
+    const out: string[] = []
+    for (const i of inputs) {
+      const r: any = await $.tool.call({ tool: 'Agent', description: 'd', prompt: 'p', ...i } as never)
+      out.push(r.deny !== undefined ? `deny: ${r.deny}` : String(r.result ?? r.text))
+    }
+    return out
+  }
+
+  test('held to the subagent types and models the categories route to', async ($, on) => {
+    // The default config here routes explore to Explore · haiku, quick and librarian to general-purpose · haiku.
+    const out = await calls($, on, undefined, [
+      { subagent_type: 'Explore' },
+      { subagent_type: 'Explore', model: 'opus' },
+      { subagent_type: 'Explore', model: 'haiku' },
+      {},
+      { subagent_type: 'Plan' },
+    ])
+    expect(out.slice(0, 4)).toEqual(['model=haiku', 'model=haiku', 'model=haiku', 'model=haiku'])
+    expect(out[4]).toContain("subagent_type 'Plan' is not one the config")
+    expect(out[4]).toContain('Explore · haiku')
+  })
+
+  test('a config with external agents only refuses every subagent and points at scouts', async ($, on) => {
+    const out = await calls($, on, { profiles: DEFAULT_CONFIG.profiles, categories: { explore: ['claude-sonnet'], quick: ['claude-sonnet'] } }, [{ subagent_type: 'Explore', model: 'haiku' }])
+    expect(out[0]).toContain('routes no category to a subagent')
+    expect(out[0]).toContain('scout-<name>')
+  })
+})

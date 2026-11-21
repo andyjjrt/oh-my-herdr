@@ -78,11 +78,24 @@ The built-in config mixes them:
 | --- | --- |
 | explore | ◆ sub-explore → go-fast → go-deepseek |
 | quick | ◆ sub-haiku → go-fast → go-deepseek |
-| librarian | go-fast → ◆ sub-haiku → go-deepseek |
+| librarian | ◆ sub-haiku → go-fast → go-deepseek |
 | oracle, reviewer | claude-review → ◆ sub-review → go-deepseek |
 | deep | go-deepseek → claude-sonnet → ◆ sub-sonnet |
 | visual-engineering | claude-sonnet → ◆ sub-sonnet → go-deepseek |
 | writing | go-deepseek → ◆ sub-sonnet → claude-sonnet |
+
+### The lead's own subagents
+
+The lead can also call the Agent tool itself, mostly `Explore` agents while it plans. The mod holds
+those calls to the subagent profiles the categories route to:
+
+| The categories route to | The lead's Agent call |
+| --- | --- |
+| no subagent profile (external agents only) | refused; the lead explores with scouts (`omh_dispatch`, `scout-<name>`) |
+| some subagent profiles | allowed for their `subagent_type`s only, on a model listed for that type (another model, or none, becomes the first listed) |
+
+With the built-in config the lead may start `Explore` on haiku, `general-purpose` on haiku or
+sonnet and `Plan` on opus. `/ulw` tells the lead which ones it has.
 
 ## Where workers run: herdr or herdr-core
 
@@ -126,7 +139,7 @@ With hc:
   they are plain hc terminals: `hc ls`, `hc attach <address>`.
 - **hc's own notes are off** (`hc.notify`): the lead is a Claude Code prompt, and the mod already
   wakes it.
-- There are no desktop notifications, and `/omh plan` needs prismantis to show the plan beside you.
+- There are no desktop notifications.
 
 ## Worker tabs
 
@@ -169,5 +182,5 @@ A pane freed by `/omh teardown` is used again. (With hc, see
 
 With [prismantis](https://github.com/NahumLitvin/prismantis) installed, `/omh plan` previews
 plan.md in a Claude Code pane drawn in color, and an expanded worker report or result with tables
-is drawn as markdown. Without it, `/omh plan` opens a herdr pane with the first of `leaf --watch`,
-`glow`, `bat` or `less` installed.
+is drawn as markdown. Without it, `/omh plan` opens the same Claude Code pane and shows plan.md as
+plain text.

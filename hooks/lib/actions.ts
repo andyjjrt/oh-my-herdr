@@ -677,17 +677,6 @@ export async function approvePlan(): Promise<Answer & { file?: string }> {
   return { ...ok(`approved plan.md of run ${run}: ${title}`), file: p.planMd(run) }
 }
 
-/** The shell line that shows plan.md: the first of leaf (live reload), glow, bat, less that is installed. */
-export function planViewerLine(file: string): string {
-  const f = shellQuote(file)
-  return [
-    `if command -v leaf >/dev/null 2>&1; then leaf --watch ${f}`,
-    `elif command -v glow >/dev/null 2>&1; then glow -p ${f}`,
-    `elif command -v bat >/dev/null 2>&1; then bat --paging=always --language=markdown ${f}`,
-    `else less -R ${f}; fi; exit`,
-  ].join('; ')
-}
-
 /** The plan to show: the current run's draft, else its plan.md, else a pre-0.4 .omh/plan.md; null when none has text. */
 export async function planFile(): Promise<string | null> {
   const $ = host()
@@ -698,29 +687,6 @@ export async function planFile(): Promise<string | null> {
     if (await hasText($, p.planMd(run))) return p.planMd(run)
   }
   return (await hasText($, p.legacyDraft)) ? p.legacyDraft : null
-}
-
-/** /omh plan without prismantis: open plan.md in a herdr pane beside the lead, or close that pane if it is open. */
-export async function togglePlanView(): Promise<Answer> {
-  const $ = host()
-  const p = paths()
-  const open = await readJson<{ pane: string }>($, p.planView)
-  if (open && (await paneExists($, open.pane))) {
-    await closePane($, open.pane).catch(() => undefined)
-    await remove($, p.planView)
-    return ok('plan preview closed')
-  }
-  const file = await planFile()
-  if (file === null) return fail('no plan yet; the lead writes it with omh_status action "draft"')
-  if (rt.selfPane === null) return fail('the plan preview opens in a herdr pane, and the lead is not in herdr; read the plan file instead, or use prismantis to see it beside you')
-  try {
-    const pane = await splitPane($, rt.selfPane, 'right', p.root)
-    await writeJson($, p.planView, { pane })
-    await herdr($, ['pane', 'run', pane, planViewerLine(file)])
-    return ok(`plan preview opened beside you (${file}); quit the viewer or run /omh plan again to close it`)
-  } catch (err) {
-    return fail(`could not open the preview: ${(err as Error).message}`)
-  }
 }
 
 export async function writePlan(raw: unknown): Promise<Answer> {

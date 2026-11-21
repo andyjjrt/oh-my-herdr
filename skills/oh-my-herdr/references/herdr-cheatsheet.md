@@ -36,6 +36,15 @@ herdr pane wait-output <pane> --regex "passed|failed" --timeout 120000
 herdr pane read <pane> --source recent-unwrapped --lines 80
 ```
 
+With herdr-core (the lead in an hc terminal), the same with `hc`:
+```bash
+hc run --name omh-test --cwd /repo -- npm test          # waits like a shell; exit code is the test's
+hc run --bg --no-notify --name omh-dev -- npm run dev   # a server: comes back at once
+hc wait <t>                                             # until it stops working
+hc read <t>                                             # its screen and history
+hc kill <t>
+```
+
 ## Errors you will see
 - `agent_not_ready` — startup hit a prompt; read the pane.
 - `agent_blocked` — prompt refused because a dialog is open.
