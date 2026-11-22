@@ -71,7 +71,7 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
    ```
 
    Tasks in one wave must not own the same files (the tool refuses it); `deps` point at earlier waves. Every wave needs a gate you can actually check. `category` is a routing name from the config (`deep`, `reviewer`, …), not the intent. A rejected plan keeps its approval: fix it and send it again. To change the plan mid-run, draft again without `name`, stop, and wait for `/omh approve` (the old plan.md is kept as `plan.v<n>.md`); for new work, draft with a new `name`. For a risky plan, make wave 1 an `oracle` critique.
-5. **Dispatch the wave.** `omh_dispatch` per task: `task`, `intent`, `category`, a one-line `rationale`, and a self-contained `brief` (template in `references/roles.md`). The files the task owns and the reporting contract are appended for you. Leave `worker` and `profile` out unless the user asked for a specific one — routing picks a profile with quota and starts or reuses a worker. For a review task, pass `reviews: <task id>` so the reviewer comes from another model family.
+5. **Dispatch the wave.** `omh_dispatch` per task: `task`, `intent`, `category`, a one-line `rationale`, and a self-contained `brief` (template in `references/roles.md`). The files the task owns and the reporting contract are appended to the brief for you, and the prompt the worker receives repeats them: it names `brief.md`, the `result.md` path to write, and the one-line reply `DONE <result.md>` / `BLOCKED <reason>`. When you `hc send` a worker yourself, use that same shape. Leave `worker` and `profile` out unless the user asked for a specific one — routing picks a profile with quota and starts or reuses a worker. For a review task, pass `reviews: <task id>` so the reviewer comes from another model family.
 6. **Stop.** After dispatching, end your turn (or do unrelated work). Do not sleep, poll, or run `herdr agent wait`. The mod sends you a message:
    - **Wave settled** — a table of every task's state. Continue at step 7.
    - **Worker blocked / stalled / idle without a result / gone** — with a diagnosis (`quota-exhausted`, `permission-prompt`, `config-error`, `crashed`, `interrupted`, or `unknown` with the screen). Act on it: re-dispatch the task without naming a worker when quota ran out; tell the user what to fix for a config error. **Never answer a worker's permission dialog that changes files, runs commands or grants access without asking the user.** If the screen shows the worker busy (or its report exists) despite a stalled / idle-without-result alert, call `omh_status` with `action: "recheck"` and the task: it re-reads the live status and corrects the task instead of re-dispatching it. Other workers keep running meanwhile.
@@ -85,7 +85,14 @@ Fan-out costs 10–30 s per worker plus integration. Do it yourself when the tas
 
    Keep one terminal for checks and reuse it. A one-second check (`git diff --stat`, a single grep) stays in Bash.
 8. **Gate.** When every task of the wave is verified or abandoned, run the gate's check (typically a `reviewer` task in the next wave, plus the test suite) and `omh_status` with `action: "gate"`. The next wave can't be dispatched until then.
-9. **Finish.** All gates passed → final acceptance check, tell the user what changed, the evidence it works, and what's still open. Then `omh_teardown` unless they want the workers kept.
+9. **Finish.** All gates passed → final acceptance check, tell the user what changed, the evidence it works, and what's still open. Then `omh_teardown` unless they want the workers kept. Then call `omh_status` with `action: "finish"`; it refuses open gates and only records state. The user closes the run with `/omh close [run] [force]`: workers torn down and the session unbound. omh never touches git or worktrees: commit, merge or remove them yourself if asked.
+
+### Several runs and worktrees
+
+- Each `draft` with a new `name` is its own run; earlier drafts stay. `/omh runs` lists them with lead and root; the user approves the current one with `/omh approve` or any by id (`/omh approve <id>`).
+- `/omh approve [<id>]` binds **this session** to that run, in whatever checkout it runs in. A run another live session leads is refused unless the user says `/omh approve <id> force` (a takeover). omh does not create or remove worktrees. To work a run in its own checkout the user does: `git worktree add ../repo.worktrees/x -b feat/x`, `cd ../repo.worktrees/x && claude`, `/omh approve <id>`. Workers start in the session's own root.
+- Two leads in one checkout are allowed; that is the user's responsibility.
+- Once bound, that run stays yours even if another lead drafts a new name. You may still `draft` a new `name` (the draft is written, your binding is unchanged), but `/omh approve <other>` is refused until your run is finished or closed; the user can approve it from another Claude. A bound session re-approves its own run.
 
 `mass ulw` is the same loop with more waves and workers per wave; stay within the config's `max_concurrent`.
 
@@ -104,7 +111,7 @@ If the user wants a specific agent or model, pass `profile`. If no profile fits,
 
 ## 5. Results come back as files
 
-Every brief tells the worker to write `.omh/runs/<run>/<task>/result.md` and reply `DONE <path>` or `BLOCKED <reason>`. Read the file (`omh_collect`), not the screen; the screen is only for diagnosis, which the mod does for you.
+Every brief, and the prompt that points at it, tells the worker to write `.omh/runs/<run>/<task>/result.md` and reply `DONE <path>` or `BLOCKED <reason>`. Read the file (`omh_collect`), not the screen; the screen is only for diagnosis, which the mod does for you.
 
 ## 6. Things that go wrong
 

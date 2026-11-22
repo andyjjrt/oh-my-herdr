@@ -32,8 +32,8 @@
 
   "profiles": {
     "claude-opus":   { "agent": "claude", "family": "claude", "args": ["--model", "opus"] },
-    "claude-sonnet": { "agent": "claude", "family": "claude", "args": ["--model", "sonnet", "--permission-mode", "acceptEdits"] },
-    "claude-review": { "agent": "claude", "family": "claude", "args": ["--model", "opus", "--permission-mode", "plan"] },
+    "claude-sonnet": { "agent": "claude", "family": "claude", "args": ["--model", "sonnet", "--permission-mode", "auto"] },
+    "claude-review": { "agent": "claude", "family": "claude", "args": ["--model", "opus", "--permission-mode", "auto"] },
 
     "sub-explore":   { "agent": "subagent", "family": "claude", "subagent_type": "Explore", "model": "haiku" },
     "sub-haiku":     { "agent": "subagent", "family": "claude", "subagent_type": "general-purpose", "model": "haiku" },

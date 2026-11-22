@@ -41,7 +41,7 @@ export type RouteResult =
 export function pickProfile(
   cfg: Config,
   category: string,
-  opts: { intent: Intent | null; avoidFamilies: readonly string[]; quotaOk: (profile: string) => boolean | string },
+  opts: { intent: Intent | null; avoidFamilies: readonly string[]; quotaOk: (profile: string) => boolean | string; unusable?: Set<string> },
 ): RouteResult {
   const cat = cfg.categories[category]
   if (!cat) {
@@ -53,6 +53,10 @@ export function pickProfile(
   for (const p of rank(category, opts.intent, cat.profiles)) {
     if (!cfg.profiles[p]) {
       warnings.push(`category '${category}' lists undefined profile '${p}'`)
+      continue
+    }
+    if (opts.unusable?.has(p)) {
+      skipped.push(`${p}: its agent cannot report status on this backend`)
       continue
     }
     const q = opts.quotaOk(p)

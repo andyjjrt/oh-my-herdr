@@ -1,9 +1,10 @@
 // The pure parts: state machine, routing, plan validation, quota parsing, diagnosis, guards.
 
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { normalizeConfig } from '../hooks/lib/config'
 import { diagnose } from '../hooks/lib/diagnose'
+import { currentRunId, openRunId, Paths, runWorkerName } from '../hooks/lib/files'
 import { ownerOf, relativeTo } from '../hooks/lib/guards'
 import { closestName, draftDigest, findTask, isApproved, isScout, parsePlan, planningStatusFile, planRunId, SCOUT_ID, runView, statusFile, taskStatus, unknownCategory, waveProgress, type TaskFacts } from '../hooks/lib/plan'
 import { evaluate, formatQuota, parseClaude, parseCommandQuota, parseOpencodeGo, probe, providerOf, providersOf, quotaAllows } from '../hooks/lib/quota'
@@ -16,6 +17,7 @@ import { drawMarkdown, hasPrismantis, looksLikeMarkdown, splitCollected } from '
 import { endStatusOf, isSubagentWorker, settleStatusOf, subagentIdOf, subagentPane, subagentScreen } from '../hooks/lib/subagent'
 import { configProblems, isSubagentProfile } from '../hooks/lib/config'
 import { place } from '../hooks/lib/layout'
+import { bindRun, decodeWake, encodeWake, flushWake, host, liveWorkersAll, paths, queueWake, reconcile, refreshRun, rt, unbindRun, type WakeSpec } from '../hooks/lib/runtime'
 import type { OmhQuota } from '../types'
 import { CLAUDE_USAGE, OPENCODE_GO_USAGE } from './fixtures/quota'
 
@@ -725,5 +727,373 @@ describe('tool rows', () => {
     expect(resultText({ content: [{ type: 'text', text: 'x' }] })).toBe('x')
     expect(firstLine('\nplan.md written\nNow give\nDo not')).toEqual({ line: 'plan.md written', more: 2 })
     expect(firstLine('x'.repeat(120)).line.length).toBe(80)
+  })
+})
+
+describe('run binding', () => {
+  type Mem = Map<string, string>
+
+  const cell = <T,>(init: T) => {
+    let v = init
+    return { get: async () => v, set: async (fn: (old: T) => T) => (v = fn(v)) }
+  }
+
+  /** A session facade over an in-memory disk: just what bindRun, the run view and the status file touch. */
+  function fakeHost(mem: Mem, opts: { panes?: Set<string>; tabs?: Record<string, string[]> } = {}) {
+    const dirOf = (p: string) => [...mem.keys()].some(k => k.startsWith(`${p.replace(/\/$/, '')}/`))
+    return {
+      fs: {
+        read: async (path: string) => {
+          const t = mem.get(path)
+          if (t === undefined) throw new Error(`ENOENT ${path}`)
+          return t
+        },
+        write: async (path: string, text: string) => void mem.set(path, text),
+        exists: async (path: string) => mem.has(path) || dirOf(path),
+        stat: async (path: string) => ({ kind: mem.has(path) ? 'file' : 'dir', size: 0 }),
+        list: async (path: string) => {
+          const dir = `${path.replace(/\/$/, '')}/`
+          const names = new Set([...mem.keys()].filter(k => k.startsWith(dir)).map(k => k.slice(dir.length).split('/')[0]!))
+          return [...names].map(name => ({ name, kind: mem.has(dir + name) ? 'file' : 'dir', size: 0 }))
+        },
+      },
+      process: {
+        run: async (argv: string[]) => {
+          const ok = (stdout = '') => ({ exitCode: 0, stdout, stderr: '' })
+          const no = { exitCode: 1, stdout: '', stderr: '' }
+          if (argv[0] === 'rm') return (mem.delete(argv[argv.length - 1]!), ok())
+          if (argv[0] !== 'herdr') return no
+          const [, a, b, c] = argv
+          if (a === 'pane' && b === 'get') return opts.panes?.has(c!) ? ok('{}') : no
+          if (a === 'tab' && b === 'get') return opts.tabs?.[c!] ? ok(JSON.stringify({ result: { tab: { workspace_id: 'w1' } } })) : no
+          if (a === 'pane' && b === 'list') {
+            const panes = Object.entries(opts.tabs ?? {}).flatMap(([tab, ps]) => ps.map(pane_id => ({ tab_id: tab, pane_id })))
+            return ok(JSON.stringify({ result: { panes } }))
+          }
+          return no
+        },
+        spawn: () => (async function* () {})(),
+      },
+      ui: { log() {} },
+      agent: { list: async () => [] },
+      clock: { now: async () => Date.UTC(2026, 10, 21), after: () => ({ cancel() {} }), every: () => ({ cancel() {} }) },
+      state: {
+        run: cell<unknown>(null),
+        workers: cell<Record<string, unknown>>({}),
+        bound: cell<unknown>(null),
+        wake: cell({ sections: [] as string[], settleKey: '' }),
+      },
+    }
+  }
+
+  const plan = (id: string) => JSON.stringify({ goal: `goal ${id}`, waves: [{ id: 1, gate: 'g', tasks: [{ id: 'T1', title: 't', intent: 'implement', category: 'deep', owns: [], deps: [] }] }] })
+
+  /** Two runs in the central .omh; current-run names a. */
+  async function session(mem: Mem, opts: Parameters<typeof fakeHost>[1] = {}) {
+    mem.set('/main/repo/.omh/current-run', 'a\n')
+    for (const id of ['a', 'b']) {
+      mem.set(`/main/repo/.omh/runs/${id}/draft.md`, `# Run ${id}\n`)
+      mem.set(`/main/repo/.omh/runs/${id}/plan.json`, plan(id))
+    }
+    const saved = { $: rt.$, paths: rt.paths, cfg: rt.cfg, paneSeen: rt.paneSeen, wakeGuards: rt.wakeGuards, watchers: rt.watchers, options: rt.options, wakeTimer: rt.wakeTimer }
+    rt.$ = fakeHost(mem, opts) as never
+    rt.paneSeen = new Map()
+    rt.wakeGuards = new Map()
+    rt.watchers = new Map()
+    rt.cfg = null
+    rt.paths = new Paths('/main/repo', '/main/repo/.omh')
+    return () => {
+      for (const w of rt.watchers.values()) w.stopped = true
+      Object.assign(rt, saved)
+    }
+  }
+
+  test('Paths: .omh stays central while the root and the workers tab follow the bound run', () => {
+    const p = new Paths('/wt/repo-b', '/main/repo/.omh', 'b')
+    expect(p.root).toBe('/wt/repo-b')
+    expect(p.omh).toBe('/main/repo/.omh')
+    expect(p.tab).toBe('/main/repo/.omh/runs/b/tab.json')
+    expect(p.runStatus('b')).toBe('/main/repo/.omh/runs/b/status.json')
+    expect(p.status).toBe('/main/repo/.omh/status.json')
+    expect(new Paths('/main/repo', '/main/repo/.omh').tab).toBe('/main/repo/.omh/tab.json')
+  })
+
+  test('a bound run wins in openRunId and currentRunId; unbound, current-run does', async () => {
+    const mem: Mem = new Map([
+      ['/m/.omh/current-run', 'a\n'],
+      ['/m/.omh/runs/a/plan.json', plan('a')],
+      ['/m/.omh/runs/b/draft.md', '# b'],
+    ])
+    const $ = fakeHost(mem) as never
+    expect(await openRunId($, new Paths('/m', '/m/.omh'))).toBe('a')
+    expect(await currentRunId($, new Paths('/m', '/m/.omh'))).toBe('a')
+    const bound = new Paths('/wt', '/m/.omh', 'b')
+    expect(await openRunId($, bound)).toBe('b')
+    expect(await currentRunId($, bound)).toBe(null) // b has no plan.json yet
+    mem.set('/m/.omh/runs/b/plan.json', plan('b'))
+    expect(await currentRunId($, bound)).toBe('b')
+    expect(await currentRunId($, new Paths('/m', '/m/.omh'))).toBe('a')
+  })
+
+  test('bindRun: a session bound to run b sees b while current-run names a; rebinding re-roots paths().root', async () => {
+    const mem: Mem = new Map()
+    const restore = await session(mem)
+    try {
+      expect(await openRunId(host(), paths())).toBe('a')
+      await bindRun('b', '/wt/repo-b')
+      expect(paths().root).toBe('/wt/repo-b')
+      expect(paths().omh).toBe('/main/repo/.omh')
+      expect(paths().tab).toBe('/main/repo/.omh/runs/b/tab.json')
+      expect(await openRunId(host(), paths())).toBe('b')
+      expect(await currentRunId(host(), paths())).toBe('b')
+      expect(await host().state.bound.get()).toEqual({ run: 'b', root: '/wt/repo-b' })
+      expect(mem.get('/main/repo/.omh/current-run')).toBe('a\n')
+
+      await bindRun('a', '/wt/repo-a')
+      expect(paths().root).toBe('/wt/repo-a')
+      expect(await openRunId(host(), paths())).toBe('a')
+
+      await unbindRun() // the same checkout as before: only the binding goes
+      expect(paths().root).toBe('/wt/repo-a')
+      expect(paths().boundRun).toBe(null)
+      expect(paths().tab).toBe('/main/repo/.omh/tab.json')
+      expect(await host().state.bound.get()).toEqual({ run: null })
+    } finally {
+      restore()
+    }
+  })
+
+  test('.omh/status.json: only an unbound session writes the top-level fields; a bound one updates `runs` only', async () => {
+    const mem: Mem = new Map()
+    const restore = await session(mem)
+    try {
+      await refreshRun() // unbound: main's run (current-run = a) is on top
+      expect(JSON.parse(mem.get('/main/repo/.omh/status.json')!).run).toBe('a')
+      await bindRun('b', '/wt/repo-b')
+      const summary = JSON.parse(mem.get('/main/repo/.omh/status.json')!)
+      expect(summary.run).toBe('a') // not overwritten by the bound session
+      expect(summary.goal).toBe('goal a')
+      expect(summary.runs.map((r: { id: string }) => r.id)).toEqual(['a', 'b'])
+      expect(summary.runs.find((r: { id: string }) => r.id === 'a')).toMatchObject({ goal: 'goal a', state: 'running', total: 1, done: 0 })
+      expect(JSON.parse(mem.get('/main/repo/.omh/runs/b/status.json')!).run).toBe('b')
+    } finally {
+      restore()
+    }
+  })
+
+  test('a bound session with no summary yet writes one with an empty top and its runs', async () => {
+    const mem: Mem = new Map()
+    const restore = await session(mem)
+    try {
+      await bindRun('b', '/wt/repo-b')
+      const summary = JSON.parse(mem.get('/main/repo/.omh/status.json')!)
+      expect(summary.run).toBe('')
+      expect(summary.runs.map((r: { id: string }) => r.id)).toEqual(['a', 'b'])
+    } finally {
+      restore()
+    }
+  })
+
+  test('unbindRun stores an explicit { run: null }', async () => {
+    const mem: Mem = new Map()
+    const restore = await session(mem)
+    try {
+      await bindRun('b', '/wt/repo-b')
+      await unbindRun()
+      expect(await host().state.bound.get()).toEqual({ run: null })
+    } finally {
+      restore()
+    }
+  })
+
+  test('liveWorkersAll counts the agent files of every run, skipping gone workers and vanished panes', async () => {
+    const mem: Mem = new Map()
+    const panes = new Set(['p1', 'p2', 'p3'])
+    const restore = await session(mem, { panes })
+    try {
+      const worker = (run: string, pane: string) => JSON.stringify({ pane, profile: 'x', family: 'claude', agent: 'claude', task: 'T1', run })
+      mem.set('/main/repo/.omh/agents/ra.json', worker('a', 'p1'))
+      mem.set('/main/repo/.omh/agents/rb.json', worker('b', 'p2'))
+      mem.set('/main/repo/.omh/agents/rc.json', worker('b', 'p3'))
+      mem.set('/main/repo/.omh/agents/rd.json', worker('b', 'p-stale')) // its pane is gone: a stale file
+      await host().state.workers.set(() => ({ rc: { name: 'rc', phase: 'gone' } as never }))
+      expect(await liveWorkersAll()).toBe(2)
+      // Answers are cached (~30 s): a pane closing a moment later is not asked about again.
+      panes.delete('p1')
+      expect(await liveWorkersAll()).toBe(2)
+      rt.paneSeen.clear()
+      expect(await liveWorkersAll()).toBe(1)
+    } finally {
+      restore()
+    }
+  })
+
+  test('B1: session A\'s reconcile ignores session B\'s workers in the shared .omh/agents', async () => {
+    const mem: Mem = new Map()
+    const restore = await session(mem, { panes: new Set(['pa', 'pb']) })
+    try {
+      const file = (run: string, cwd: string, pane: string) => JSON.stringify({ pane, profile: 'x', family: 'claude', agent: 'claude', cwd, task: 'T1', run })
+      mem.set('/main/repo/.omh/agents/mine.json', file('a', '/main/repo', 'pa'))
+      mem.set('/main/repo/.omh/agents/theirs.json', file('b', '/wt/repo-b', 'pb'))
+      await reconcile() // session A: unbound on the main checkout, current-run a
+      expect(Object.keys(await host().state.workers.get())).toEqual(['mine'])
+      expect([...rt.watchers.keys()]).toEqual(['mine'])
+      // Session B, bound to run b in its worktree, takes the other one.
+      await bindRun('b', '/wt/repo-b')
+      rt.watchers = new Map()
+      await host().state.workers.set(() => ({}))
+      await reconcile()
+      expect(Object.keys(await host().state.workers.get())).toEqual(['theirs'])
+      expect([...rt.watchers.keys()]).toEqual(['theirs'])
+    } finally {
+      restore()
+    }
+  })
+
+  test('N4: bindRun carries the tabs holding this session\'s workers to the run, and leaves the rest', async () => {
+    const mem: Mem = new Map()
+    const restore = await session(mem, { tabs: { t1: ['w1:p5', 'w1:p6'], t2: ['w1:p9'] } })
+    try {
+      mem.set('/main/repo/.omh/tab.json', JSON.stringify({ tabs: [{ tab: 't1', root_pane: 'w1:p5' }, { tab: 't2', root_pane: 'w1:p9' }, { tab: 't-gone', root_pane: 'w1:p0' }] }))
+      await host().state.workers.set(() => ({ w: { name: 'w', pane: 'w1:p6', phase: 'running' } as never }))
+      await bindRun('b', '/wt/repo-b')
+      expect(JSON.parse(mem.get('/main/repo/.omh/runs/b/tab.json')!).tabs.map((t: { tab: string }) => t.tab)).toEqual(['t1'])
+      expect(JSON.parse(mem.get('/main/repo/.omh/tab.json')!).tabs.map((t: { tab: string }) => t.tab)).toEqual(['t2']) // another session's, and the dead one dropped
+    } finally {
+      restore()
+    }
+  })
+
+  test('N2: the stale-wake guard survives a reload (kept in $.state.wake, not in the module)', async () => {
+    const mem: Mem = new Map()
+    const restore = await session(mem)
+    try {
+      rt.options = { ...rt.options, wakeOnSettle: true }
+      const sent: string[] = []
+      const timers: Array<() => void> = []
+      const h = host() as any
+      h.prompt = { submit: async ({ text }: { text: string }) => void sent.push(text) }
+      h.clock.after = (_ms: number, fn: () => void) => (timers.push(fn), { cancel() {} })
+      rt.wakeTimer = null
+      const spec: WakeSpec = { kind: 'worker', name: 'w1', task: 'T1', phase: 'stalled' }
+      expect(decodeWake(encodeWake('ALERT text', spec))).toEqual({ text: 'ALERT text', spec })
+      expect(decodeWake('plain')).toEqual({ text: 'plain', spec: null })
+
+      await host().state.workers.set(() => ({ w1: { name: 'w1', task: 'T1', phase: 'stalled' } as never }))
+      await queueWake('ALERT text', async () => 'closure', spec)
+      const stored = (await host().state.wake.get()).sections
+      expect(stored).toHaveLength(1)
+      expect(stored[0]).toContain('"name":"w1"') // serializable: the spec is in the state
+      // A hot reload: module variables reset, $.state stays.
+      rt.wakeGuards = new Map()
+      rt.wakeTimer = null
+      timers.length = 0
+      await host().state.workers.set(() => ({ w1: { name: 'w1', task: 'T2', phase: 'running' } as never })) // the task moved on meanwhile
+      await flushWake()
+      timers.shift()!()
+      for (let i = 0; i < 30; i++) await Promise.resolve()
+      expect(sent).toEqual([]) // dropped by the rebuilt guard
+      // Still holding it: sent, without the marker.
+      rt.wakeTimer = null
+      await host().state.workers.set(() => ({ w1: { name: 'w1', task: 'T1', phase: 'stalled' } as never }))
+      await queueWake('ALERT text', undefined, spec)
+      timers.shift()!()
+      for (let i = 0; i < 30; i++) await Promise.resolve()
+      expect(sent).toEqual(['ALERT text'])
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('booting in a worktree', () => {
+  const GIT: Record<string, string> = {
+    'rev-parse --show-toplevel': '/wt/repo-b',
+    'rev-parse --path-format=absolute --git-common-dir': '/main/repo/.git',
+  }
+  const PLAN = JSON.stringify({ goal: 'goal b', waves: [{ id: 1, gate: 'g', tasks: [{ id: 'T1', title: 't', intent: 'implement', category: 'deep', owns: [], deps: [] }] }] })
+
+  async function boot($: any, on: any, mem: Map<string, string>, env: Record<string, string>) {
+    const dirOf = (p: string) => [...mem.keys()].some(k => k.startsWith(`${p.replace(/\/$/, '')}/`))
+    const asset = (p: string) => {
+      const m = /\/skills\/oh-my-herdr\/assets\/(agents|config\.default)\.json$/.exec(p)?.[1]
+      if (m === undefined) return undefined
+      return JSON.stringify(m === 'agents' ? { claude: { launch: 'herdr-kind', kind: 'claude' } } : { profiles: { s: { agent: 'claude', family: 'claude', args: [] } }, categories: { deep: ['s'] } })
+    }
+    on('fs.read', (_$: any, e: any) => {
+      const t = asset(e.path) ?? mem.get(e.path)
+      if (t === undefined) throw new Error(`ENOENT ${e.path}`)
+      return { value: t }
+    })
+    on('fs.write', (_$: any, e: any) => (mem.set(e.path, e.text), { value: undefined }))
+    on('fs.exists', (_$: any, e: any) => ({ value: asset(e.path) !== undefined || mem.has(e.path) || dirOf(e.path) }))
+    on('fs.stat', (_$: any, e: any) => {
+      if (mem.has(e.path)) return { value: { kind: 'file', size: 1 } }
+      if (dirOf(e.path)) return { value: { kind: 'dir', size: 0 } }
+      throw new Error(`ENOENT ${e.path}`)
+    })
+    on('fs.list', (_$: any, e: any) => {
+      const dir = `${e.path.replace(/\/$/, '')}/`
+      const names = new Set([...mem.keys()].filter(k => k.startsWith(dir)).map(k => k.slice(dir.length).split('/')[0]!))
+      return { value: [...names].map(name => ({ name, kind: mem.has(dir + name) ? 'file' : 'dir', size: 0 })) }
+    })
+    on('process.run', (_$: any, e: any) => {
+      const out = e.argv[0] === 'git' ? GIT[e.argv.slice(1).join(' ')] : undefined
+      return { value: { exitCode: out === undefined ? 1 : 0, stdout: out ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    on('http.fetch', () => {
+      throw new Error('offline')
+    })
+    mock.env(on, { HERDR_ENV: '1', HERDR_PANE_ID: 'w1:p1', HOME: '/home/u', ...env })
+    const clock = mock.clock(on, { now: new Date(2026, 10, 21, 20, 0).getTime() } as never)
+    on('tool.register', (_$: any, e: any) => ({ value: { tool: `mcp__oh-my-herdr__${e.name}` } }))
+    on('command.register', (_$: any, e: any) => ({ value: { command: e.name } }))
+    on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/wt/repo-b' })
+    await clock.settle()
+  }
+
+  test('.omh is the main repo\'s, found through the git common dir; OMH_RUN binds the lead to its run', async ($, on) => {
+    const mem = new Map<string, string>([
+      ['/main/repo/.omh/current-run', 'a\n'],
+      ['/main/repo/.omh/runs/a/draft.md', '# a\n'],
+      ['/main/repo/.omh/runs/b/plan.json', PLAN],
+    ])
+    await boot($, on, mem, { OMH_RUN: 'b' })
+    // Nothing is written under the worktree; the bound run's files land in the central .omh.
+    expect([...mem.keys()].some(k => k.startsWith('/wt/'))).toBe(false)
+    expect(JSON.parse(mem.get('/main/repo/.omh/runs/b/status.json')!)).toMatchObject({ run: 'b', goal: 'goal b' })
+    // A bound session leaves the summary's top level to the main checkout's own session; it only lists itself in `runs`.
+    const summary = JSON.parse(mem.get('/main/repo/.omh/status.json')!)
+    expect(summary.run).toBe('')
+    expect(summary.runs.map((r: { id: string }) => r.id)).toContain('b')
+    expect(mem.get('/main/repo/.omh/current-run')).toBe('a\n')
+  })
+
+  test('OMH_DIR still names where .omh lives', async ($, on) => {
+    const mem = new Map<string, string>([
+      ['/custom/omh/current-run', 'b\n'],
+      ['/custom/omh/runs/b/plan.json', PLAN],
+    ])
+    await boot($, on, mem, { OMH_DIR: '/custom/omh' })
+    expect(JSON.parse(mem.get('/custom/omh/status.json')!).run).toBe('b')
+    expect([...mem.keys()].some(k => k.startsWith('/main/'))).toBe(false)
+  })
+})
+
+describe('runWorkerName', () => {
+  const VALID = /^[a-z][a-z0-9_-]{0,31}$/
+  test('two runs never share a worker name, and the result is a valid name', () => {
+    const a = runWorkerName('20261121-multi-run', 't1')
+    const b = runWorkerName('20261121-other', 't1')
+    expect(a).not.toBe(b)
+    expect(a.endsWith('-t1')).toBe(true)
+    expect(VALID.test(a)).toBe(true)
+    expect(runWorkerName('20261121-multi-run', 't1')).toBe(a)
+  })
+  test('without a run the base is kept; a long base is cut to 32', () => {
+    expect(runWorkerName(null, 't1')).toBe('t1')
+    expect(runWorkerName('', 't1')).toBe('t1')
+    expect(runWorkerName('r', 'x'.repeat(60)).length).toBe(32)
   })
 })

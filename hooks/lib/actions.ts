@@ -3,9 +3,9 @@
 
 
 import type { OmhWorker } from '../../types'
-import { type BackendSetting, configProblems, isSubagentProfile, type Config } from './config'
+import { type BackendSetting, configProblems, isSubagentProfile, statusReportProblems, type Config } from './config'
 import { diagnose, excerpt } from './diagnose'
-import { currentRunId, hasText, openRunId, listWorkers, readGates, readJson, remove, writeJson, type Closing, type DispatchFile, type WorkerFile } from './files'
+import { hasText, listWorkers, ownsWorker, readGates, readJson, remove, runTag, runWorkerName, writeJson, type Closing, type DispatchFile, type WorkerFile } from './files'
 import { agentStatus, closePane, paneExists, promptWorker, readCommand, readScreen, resolveBackend, type BackendKind } from './backend'
 import { hcPane, hcRun, hcWaitReady, PASS_ENV, placement } from './hc'
 import { createTab, herdr, HerdrError, paneHome, shellQuote, splitPane, tabPanes } from './herdr'
@@ -24,7 +24,16 @@ import {
   feed,
   host,
   historyFile,
+  currentRun,
+  leadId,
+  openRun,
+  liveWorkersAll,
   loadPlan,
+  logEvent,
+  bindRun,
+  isClosed,
+  otherLiveLead,
+  readLead,
   onSubagentEnd,
   paths,
   recheck,
@@ -35,14 +44,38 @@ import {
   setWorker,
   startWatcher,
   stopWatcher,
+  unbindRun,
   workers,
 } from './runtime'
-import { statusBrief, statusText } from './text'
+import { handoffPrompt, statusBrief, statusText } from './text'
 
 export type Answer = { ok: boolean; text: string }
 
 const ok = (text: string): Answer => ({ ok: true, text })
 const fail = (text: string): Answer => ({ ok: false, text })
+
+/** Names of the worker files this session owns (ownsWorker): .omh/agents/ is shared by every lead. */
+async function ownedNames(opts: { usableHere?: boolean } = {}): Promise<Set<string>> {
+  const $ = host()
+  const p = paths()
+  const here = (cwd: string | undefined) => (cwd ?? '').replace(/\/+$/, '') === p.root.replace(/\/+$/, '')
+  return new Set((await listWorkers($, p)).filter(f => ownsWorker(f, p, leadId()) && (opts.usableHere !== true || here(f.cwd))).map(f => f.name))
+}
+
+/**
+ * A scout's id as stored: the bare id when unbound; `<runtag>-<id>` when bound, so two leads' scouts
+ * never share runs/_scout/<id>/. The worker's task is this key too (the runtime reads the result by it).
+ * Accepts the bare id or the tagged one (what a wake-up lists); null when it is not a scout of this session.
+ */
+function scoutKey(p: ReturnType<typeof paths>, id: string): { base: string; key: string } | null {
+  if (p.boundRun === null) return isScout(id) ? { base: id, key: id } : null
+  const prefix = `${runTag(p.boundRun)}-`
+  const base = id.startsWith(prefix) ? id.slice(prefix.length) : id
+  return isScout(base) ? { base, key: `${prefix}${base}` } : null
+}
+
+/** Whether a task id names a scout (bare, or tagged by this bound session). */
+const isScoutRef = (p: ReturnType<typeof paths>, id: string) => scoutKey(p, id) !== null
 
 const NAME = /^[a-z][a-z0-9_-]{0,31}$/
 const STARTUP_MS = 90_000
@@ -73,6 +106,11 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
   if (!NAME.test(args.name)) return fail(`invalid worker name '${args.name}' (must match ${NAME.source})`)
 
   const ws = await workers()
+  // .omh/agents/<name>.json is shared by every lead: never overwrite another session's live worker.
+  const onDisk = await readJson<WorkerFile>($, p.agent(args.name))
+  if (onDisk && !ownsWorker(onDisk, p, leadId()) && (isSubagentPane(onDisk.pane) || (await paneExists($, onDisk.pane).catch(() => true)))) {
+    return fail(`worker name '${args.name}' is taken by another lead's live worker (pane ${onDisk.pane}); choose another name`)
+  }
   const existing = ws[args.name]
   if (existing && existing.phase !== 'gone') {
     const st = await agentStatus($, existing.pane).catch(() => 'unknown')
@@ -91,7 +129,7 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
   } else if (args.category) {
     // A subagent starts with its task (omh_dispatch); a pane worker is all omh_spawn can start ahead of time.
     const quotaOk = (pr: string) => (isSubagentProfile(cfg, pr) ? 'a subagent profile (starts at dispatch)' : quotaAllows(cfg, q, pr))
-    const r = pickProfile(cfg, args.category, { intent: args.intent ?? null, avoidFamilies: args.avoidFamilies ?? [], quotaOk })
+    const r = pickProfile(cfg, args.category, { intent: args.intent ?? null, avoidFamilies: args.avoidFamilies ?? [], quotaOk, unusable: await unusableProfiles(cfg) })
     if (!r.ok) return fail(JSON.stringify({ error: 'no-profile', reason: r.error, skipped: r.skipped }))
     profile = r.profile
     warnings = r.warnings
@@ -100,7 +138,8 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
   }
 
   if (cfg.maxConcurrent > 0) {
-    const live = Object.values(ws).filter(w => w.phase !== 'gone' && w.name !== args.name).length
+    // Across every run: workers of other runs share the limit (their agent files are central).
+    const live = (await liveWorkersAll()) - (ws[args.name] && ws[args.name]!.phase !== 'gone' ? 1 : 0)
     if (live >= cfg.maxConcurrent) return fail(`max_concurrent=${cfg.maxConcurrent} workers already running; reuse a free one or tear one down`)
   }
 
@@ -134,12 +173,14 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
     agent: prof.agent,
     pane,
     cwd,
-    run: null,
+    // A bound lead's own workers belong to its run (ownsWorker); an unbound session's stay run-less.
+    run: p.boundRun,
     task: null,
     task_dir: null,
+    ...(leadId() !== null && { lead: leadId()! }),
   }
   await writeJson($, p.agent(args.name), file)
-  const worker = { ...newWorker({ name: args.name, pane, profile, family: prof.family, agent: prof.agent }), lastStatus: started.status }
+  const worker = { ...newWorker({ name: args.name, pane, profile, family: prof.family, agent: prof.agent }), run: p.boundRun, lastStatus: started.status }
   await setWorker(worker)
   startWatcher(args.name, pane)
 
@@ -150,6 +191,7 @@ export async function spawn(args: SpawnArgs): Promise<Spawned | Answer> {
       screen: started.screen,
       hasResult: false,
       quotaExhausted: null,
+      neverReported: /\(no status\)/.test(started.reason),
       ...(spec.diagnose !== undefined && { rules: spec.diagnose }),
       at: await $.clock.now(),
     })
@@ -328,20 +370,21 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
   if (!a.brief?.trim()) return fail('brief is required: what the worker must do, the files it owns, and how to check its work')
 
   // What is being sent: a task of the approved plan, or a scout (read-only, before or beside the plan).
-  const scout = isScout(a.task)
+  const sk = scoutKey(p, a.task)
+  const scout = sk !== null
   let run: string
   let task: { id: string; title: string; category: string; owns: string[] }
   let workerBase: string
   if (scout) {
-    if (!SCOUT_ID.test(a.task)) return fail(`bad scout id '${a.task}' (must match ${SCOUT_ID.source})`)
+    if (!SCOUT_ID.test(sk.base)) return fail(`bad scout id '${a.task}' (must match ${SCOUT_ID.source})`)
     if (!SCOUT_INTENTS.includes(intent)) return fail(`a scout is read-only: its intent must be ${SCOUT_INTENTS.join(' or ')}; anything that changes files belongs in the approved plan`)
     run = SCOUT_RUN
     const fallback = intent === 'research' && cfg.categories.librarian ? 'librarian' : 'explore'
-    task = { id: a.task, title: a.task, category: a.category ?? fallback, owns: [] }
-    workerBase = a.task
+    task = { id: sk.key, title: sk.base, category: a.category ?? fallback, owns: [] }
+    workerBase = runWorkerName(p.boundRun, sk.base)
     await remove($, p.collected(run, task.id))
   } else {
-    const current = await currentRunId($, p)
+    const current = await currentRun()
     if (current === null) {
       return fail(`no plan yet, so '${a.task}' cannot be dispatched. To explore before planning, dispatch a scout instead (task id 'scout-<name>', intent explore or research), or use Explore subagents; then draft plan.md with omh_status action "draft".`)
     }
@@ -359,7 +402,7 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
       return fail(`wave ${wave.id} cannot start: the gate of wave ${openGate.id} (“${openGate.gate}”) has not been marked passed. Verify that wave and use omh_status action "gate".`)
     }
     if (await $.fs.exists(p.verified(run, task.id))) return fail(`task ${task.id} is already verified`)
-    workerBase = `w${wave.id}-${task.id}`
+    workerBase = runWorkerName(p.boundRun, `w${wave.id}-${task.id}`)
   }
 
   const category = a.category ?? task.category
@@ -405,7 +448,7 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
       const allowed = quotaAllows(cfg, q, profile)
       if (allowed !== true) return fail(JSON.stringify({ error: 'quota-exhausted', profile, reason: allowed, hint: 'leave profile out so routing picks one with quota' }))
     } else {
-      const r = pickProfile(cfg, category, { intent, avoidFamilies: avoid, quotaOk: pr => quotaAllows(cfg, q, pr) })
+      const r = pickProfile(cfg, category, { intent, avoidFamilies: avoid, quotaOk: pr => quotaAllows(cfg, q, pr), unusable: await unusableProfiles(cfg) })
       if (!r.ok) return fail(JSON.stringify({ error: 'no-profile', reason: r.error, skipped: r.skipped }))
       profile = r.profile
       warnings.push(...r.warnings)
@@ -413,14 +456,18 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
     if (isSubagentProfile(cfg, profile)) {
       // A subagent is started below, once its brief is written; one per task, never reused.
       if (cfg.maxConcurrent > 0) {
-        const live = Object.values(ws).filter(w => w.phase !== 'gone' && !(isSubagentWorker(w) && !ACTIVE.has(w.phase))).length
+        const finishedSubagents = Object.values(ws).filter(w => w.phase !== 'gone' && isSubagentWorker(w) && !ACTIVE.has(w.phase)).length
+        const live = (await liveWorkersAll()) - finishedSubagents
         if (live >= cfg.maxConcurrent) return fail(`max_concurrent=${cfg.maxConcurrent} workers already running; wait for one or tear one down`)
       }
       const prof = cfg.profiles[profile]!
       worker = newWorker({ name: await freeName(workerBase), pane: subagentPane('starting'), profile, family: prof.family, agent: prof.agent })
     } else {
       // Reuse a free pane worker on that profile; otherwise start one named after the task.
-      worker = Object.values(ws).find(w => w.profile === profile && isFree(w) && w.phase !== 'gone' && !isSubagentWorker(w))
+      // Only this session's workers (ownsWorker) that run in this session's checkout (cwd = p.root): never another lead's pane,
+      // nor a worker left in the main checkout after bindRun, nor one started in a subfolder. Ours (teardown, reconcile) is wider than usable here.
+      const mine = await ownedNames({ usableHere: true })
+      worker = Object.values(ws).find(w => w.profile === profile && isFree(w) && w.phase !== 'gone' && !isSubagentWorker(w) && mine.has(w.name))
       // hc keeps a finished turn's 'done' until the next report; herdr may show either.
       const free = worker ? await agentStatus($, worker.pane).catch(() => 'gone') : 'gone'
       if (free !== 'idle' && free !== 'done') worker = undefined
@@ -491,7 +538,7 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
     diagnose: null,
   }
   await writeJson($, p.dispatch(run, task.id), record)
-  const instruction = `Read the file ${p.brief(run, task.id)} and carry out the task it describes. Follow its reporting instructions at the end exactly.`
+  const instruction = handoffPrompt({ brief: p.brief(run, task.id), result, owns: scout ? [] : task.owns, scout, subagent: sub })
 
   if (sub) {
     const started = await startSubagent(worker, prof, instruction, `omh ${task.id}`, a.cwd ?? p.root, { run, task: task.id, dir, category, at: now })
@@ -503,7 +550,7 @@ export async function dispatch(a: DispatchArgs): Promise<Answer> {
     worker = started
   } else {
     const wf = await readJson<WorkerFile>($, p.agent(worker.name))
-    if (wf) await writeJson($, p.agent(worker.name), { ...wf, run, task: task.id, task_dir: dir, category })
+    if (wf) await writeJson($, p.agent(worker.name), { ...wf, run, task: task.id, task_dir: dir, category, ...(leadId() !== null && { lead: leadId()! }) })
     // Recorded before the prompt: the agent can report `working` while the prompt call is still
     // returning, and the watcher never repeats it. A `working` fed to an idle worker is dropped.
     const idle = (await workers())[worker.name] ?? worker
@@ -550,7 +597,7 @@ async function startSubagent(
     .catch(err => ({ deny: (err as Error).message }) as const)
   if (r.deny !== undefined || !r.agentId) return fail(`the subagent for ${t.task} did not start: ${r.deny ?? 'no agent id came back'}`)
   const worker: OmhWorker = { ...w, pane: subagentPane(r.agentId) }
-  const file: WorkerFile = { name: w.name, category: t.category, profile: w.profile, family: w.family, agent: w.agent, pane: worker.pane, cwd, run: t.run, task: t.task, task_dir: t.dir }
+  const file: WorkerFile = { name: w.name, category: t.category, profile: w.profile, family: w.family, agent: w.agent, pane: worker.pane, cwd, run: t.run, task: t.task, task_dir: t.dir, ...(leadId() !== null && { lead: leadId()! }) }
   await writeJson($, p.agent(w.name), file)
   await setWorker(worker)
   await feed(w.name, { kind: 'dispatch', at: t.at, task: t.task, run: t.run })
@@ -563,13 +610,27 @@ async function startSubagent(
   return (await workers())[w.name] ?? worker
 }
 
+/**
+ * A worker whose task is closed goes back to the free pool: in $.state (idle, no task or run) and in its
+ * agent file (run, task and task_dir match), so ownership and reuse never see a stale run.
+ */
+async function freeWorker(holder: OmhWorker): Promise<void> {
+  const $ = host()
+  const p = paths()
+  await setWorker({ ...holder, phase: holder.phase === 'gone' ? 'gone' : 'idle', task: null, run: null, diagnosis: null })
+  const wf = await readJson<WorkerFile>($, p.agent(holder.name))
+  if (wf) await writeJson($, p.agent(holder.name), { ...wf, run: p.boundRun, task: null, task_dir: null })
+}
+
 async function freeName(base: string): Promise<string> {
   const ws = await workers()
+  const taken = new Set((await listWorkers(host(), paths())).map(f => f.name))
   let stem = base.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^[^a-z]+/, '')
   if (!stem) stem = 'w'
   stem = stem.slice(0, 28)
-  if (!ws[stem]) return stem
-  for (let i = 2; ; i++) if (!ws[`${stem}-${i}`]) return `${stem}-${i}`
+  const used = (n: string) => ws[n] !== undefined || taken.has(n)
+  if (!used(stem)) return stem
+  for (let i = 2; ; i++) if (!used(`${stem}-${i}`)) return `${stem}-${i}`
 }
 
 async function preambleFor(cfg: Config, category: string): Promise<string | null> {
@@ -600,13 +661,14 @@ async function readText($: ReturnType<typeof host>, path: string): Promise<strin
 /**
  * Step one of planning: the plan in prose, for the user to read and approve before any wave exists.
  * With `name` it starts a run (.omh/runs/<date>-<name>/draft.md) and makes it current; without, it
- * revises the current run's plan. A new run is never the default, so new work cannot land in an old run.
+ * revises this session's run (the bound one, else current-run). A new run is never the default, so new
+ * work cannot land in an old run. Earlier runs' drafts are left alone: each stays approvable by id.
  */
 export async function draftPlan(markdown: string, name?: string): Promise<Answer> {
   const $ = host()
   const p = paths()
   if (!markdown.trim()) return fail('draft needs "markdown": the plan as markdown (goal, findings, approach, tasks with acceptance checks, risks, open questions)')
-  const current = await openRunId($, p)
+  const current = await openRun()
   let run: string
   if (name !== undefined) {
     const id = planRunId(name, new Date(await $.clock.now()))
@@ -615,7 +677,8 @@ export async function draftPlan(markdown: string, name?: string): Promise<Answer
       if (await $.fs.exists(p.run(id))) {
         return fail(`run ${id} already exists. Pick another name for new work, or leave "name" out to revise the current run${current !== null ? ` (${current})` : ''}.`)
       }
-      if (current !== null) {
+      // A bound session keeps its run, so another draft takes nothing from it; an unbound one switches current-run.
+      if (current !== null && p.boundRun === null) {
         const busy = Object.values(await workers()).filter(w => w.run === current && ACTIVE.has(w.phase))
         if (busy.length > 0) {
           return fail(
@@ -630,9 +693,17 @@ export async function draftPlan(markdown: string, name?: string): Promise<Answer
     run = current
   }
   await $.fs.write(p.draft(run), `${markdown.trim()}\n`)
-  await $.fs.write(p.currentRun, `${run}\n`)
+  // A bound session keeps following its own run and leaves current-run alone; only an unbound one points it at the draft.
+  const another = p.boundRun !== null && run !== p.boundRun
+  if (p.boundRun === null) await $.fs.write(p.currentRun, `${run}\n`)
   await refreshRun()
   const lines = markdown.trim().split('\n').length
+  await logEvent('draft', run, { lines, digest: draftDigest(markdown) })
+  if (another) {
+    return ok(
+      `draft written for run ${run}: ${p.draft(run)} (${lines} lines). It is not approved yet. This session stays bound to ${p.boundRun}: it does not approve or work ${run}. Tell the user: \`/omh approve ${run}\` approves it from another Claude (one in the same checkout is fine), or from this one once ${p.boundRun} is finished or closed. Then END YOUR TURN.`,
+    )
+  }
   return ok(
     [
       `draft written for run ${run}: ${p.draft(run)} (${lines} lines). It is not approved yet.`,
@@ -646,14 +717,22 @@ export async function draftPlan(markdown: string, name?: string): Promise<Answer
  * /omh approve: the current run's draft.md, as it is now, becomes its plan.md (an earlier plan.md is
  * kept as plan.v<n>.md). With no draft, it approves plan.md again, as after editing it by hand.
  */
-export async function approvePlan(): Promise<Answer & { file?: string }> {
+export async function approvePlan(runId?: string): Promise<Answer & { file?: string; run?: string }> {
   const $ = host()
   const p = paths()
-  const run = await openRunId($, p)
-  if (run === null) {
-    const legacy = (await hasText($, p.legacyDraft)) ? ` (${p.legacyDraft} is from an older oh-my-herdr: ask the lead to draft it again with a "name")` : ''
-    return fail(`no plan to approve${legacy}; ask the lead to draft one first`)
+  let run: string | null
+  if (runId !== undefined && runId.trim() !== '') {
+    run = await findRun($, p, runId.trim())
+    if (run === null) {
+      const drafts = await runIds($, p)
+      const waiting: string[] = []
+      for (const id of drafts) if (await hasText($, p.draft(id))) waiting.push(id)
+      return fail(`no run '${runId}'. Runs with a draft: ${waiting.length > 0 ? waiting.join(', ') : 'none'}`)
+    }
+  } else {
+    run = await openRun()
   }
+  if (run === null) return fail('no plan to approve; ask the lead to draft one first')
   const draft = await readText($, p.draft(run))
   const current = await readText($, p.planMd(run))
   let text: string
@@ -674,26 +753,73 @@ export async function approvePlan(): Promise<Answer & { file?: string }> {
   await $.fs.write(p.approval(run), `${draftDigest(text)}\n`)
   await refreshRun()
   const title = text.trim().split('\n').find(l => l.trim() !== '')?.replace(/^#+\s*/, '') ?? 'plan'
-  return { ...ok(`approved plan.md of run ${run}: ${title}`), file: p.planMd(run) }
+  return { ...ok(`approved plan.md of run ${run}: ${title}`), file: p.planMd(run), run }
 }
 
-/** The plan to show: the current run's draft, else its plan.md, else a pre-0.4 .omh/plan.md; null when none has text. */
+/** Ids of the runs under .omh/runs, the scout run left out. */
+async function runIds($: ReturnType<typeof host>, p: ReturnType<typeof paths>): Promise<string[]> {
+  let entries: { name: string; kind: string }[] = []
+  try {
+    entries = await $.fs.list(p.runs)
+  } catch {
+    // no runs yet
+  }
+  return entries.filter(e => e.kind === 'dir' && e.name !== SCOUT_RUN).map(e => e.name).sort()
+}
+
+/** A run named in full, or by a suffix that names only one (`b` for `20261121-b`); null if none or ambiguous. */
+async function findRun($: ReturnType<typeof host>, p: ReturnType<typeof paths>, id: string): Promise<string | null> {
+  const ids = await runIds($, p)
+  if (ids.includes(id)) return id
+  const hits = ids.filter(r => r.endsWith(`-${id}`))
+  return hits.length === 1 ? hits[0]! : null
+}
+
+/** /omh runs: every run under .omh/runs with its state, goal, progress and whose it is. */
+export async function listRuns(): Promise<Answer> {
+  const $ = host()
+  const p = paths()
+  const mine = await openRun()
+  const rows: string[][] = []
+  for (const id of await runIds($, p)) {
+    const plan = await readJson<{ goal?: unknown; waves?: { id: number }[] }>($, p.plan(id))
+    const waves = plan !== null && Array.isArray(plan.waves) ? plan.waves : []
+    const gates = await readGates($, p, id)
+    const passed = waves.filter(w => gates.has(w.id)).length
+    let state: string
+    if (await $.fs.exists(`${p.run(id)}/closed.json`)) state = 'closed'
+    else if (waves.length > 0 && passed >= waves.length) state = 'finished'
+    else if (await hasText($, p.draft(id))) state = 'draft'
+    else if (waves.length > 0) state = 'running'
+    else state = 'approved'
+    const text = (await readText($, p.draft(id))) ?? (await readText($, p.planMd(id))) ?? ''
+    const heading = text.trim().split('\n').find(l => l.trim() !== '')?.replace(/^#+\s*/, '').trim()
+    const goal = heading || (typeof plan?.goal === 'string' && plan.goal.trim() !== '' ? plan.goal : id)
+    const whose = [id === mine ? 'this session' : '', id === p.boundRun ? 'bound' : ''].filter(Boolean).join(', ')
+    const lead = state === 'closed' ? null : await readLead(id)
+    rows.push([code(id), state, lead?.pane ?? '–', lead?.root !== undefined ? code(lead.root) : '–', goal, waves.length > 0 ? `${passed}/${waves.length}` : '–', whose])
+  }
+  if (rows.length === 0) return ok('no runs yet; ask the lead to draft a plan (omh_status action "draft" with a "name")')
+  return ok(`${table(['run', 'state', 'lead', 'root', 'goal', 'gates', 'mine'], rows)}\n\n\`/omh approve <run>\` approves a run and binds this session to it, in the checkout it runs in.`)
+}
+
+/** The plan to show: the current run's draft, else its plan.md; null when none has text. */
 export async function planFile(): Promise<string | null> {
   const $ = host()
   const p = paths()
-  const run = await openRunId($, p)
+  const run = await openRun()
   if (run !== null) {
     if (await hasText($, p.draft(run))) return p.draft(run)
     if (await hasText($, p.planMd(run))) return p.planMd(run)
   }
-  return (await hasText($, p.legacyDraft)) ? p.legacyDraft : null
+  return null
 }
 
 export async function writePlan(raw: unknown): Promise<Answer> {
   const $ = host()
   const p = paths()
   // Waves come from the current run's approved plan.md, never straight from exploring.
-  const run = await openRunId($, p)
+  const run = await openRun()
   if (run === null) {
     return fail('no plan yet. First write the plan in prose with omh_status action "draft" (markdown, and a "name" for the work), show the user a summary, and end your turn until they approve it with /omh approve.')
   }
@@ -728,11 +854,11 @@ export async function closeTask(taskId: string, quality: string, how: 'verified'
   const $ = host()
   const p = paths()
   if (!quality?.trim()) return fail('quality is required: one line on how good the result was (what held up, what you had to fix)')
-  if (isScout(taskId)) {
+  if (isScoutRef(p, taskId)) {
     if (how === 'verified') return fail(`${taskId} is a scout: omh_collect closes it (there is nothing to verify); use action "abandon" for one without a usable report`)
     return (await closeScout(taskId, quality.trim())) ?? ok(`scout ${taskId} abandoned`)
   }
-  const run = await currentRunId($, p)
+  const run = await currentRun()
   if (run === null) return fail('no run in progress')
   const plan = await loadPlan(run)
   if (!plan || !findTask(plan, taskId)) return fail(`task '${taskId}' is not in the plan of run ${run}`)
@@ -746,7 +872,7 @@ export async function closeTask(taskId: string, quality: string, how: 'verified'
   const closing: Closing = { at: await $.clock.now(), quality: quality.trim() }
   await writeJson($, how === 'verified' ? p.verified(run, taskId) : p.abandoned(run, taskId), closing)
   await recordHistory(run, taskId, closing, how)
-  if (holder) await setWorker({ ...holder, phase: holder.phase === 'gone' ? 'gone' : 'idle', task: null, run: null, diagnosis: null })
+  if (holder) await freeWorker(holder)
   const view = await refreshRun()
   const wave = view?.waves.find(w => w.tasks.some(t => t.id === taskId))
   const open = wave?.tasks.filter(t => !DONE.has(t.status)).map(t => t.id) ?? []
@@ -756,9 +882,20 @@ export async function closeTask(taskId: string, quality: string, how: 'verified'
 /** Re-read the live status of the worker holding a task and correct its phase: for an alert the lead thinks is wrong. */
 export async function recheckTask(taskId: string): Promise<Answer> {
   const $ = host()
-  const run = isScout(taskId) ? SCOUT_RUN : await currentRunId($, paths())
+  const sk = scoutKey(paths(), taskId)
+  if (sk !== null) taskId = sk.key
+  const run = sk !== null ? SCOUT_RUN : await currentRun()
   if (run === null) return fail('no run in progress')
-  const holder = Object.values(await workers()).find(w => w.run === run && w.task === taskId)
+  // The worker the task's dispatch.json names now; an old worker that once held it (before a re-dispatch) is not it.
+  const ws = await workers()
+  const d = await readJson<DispatchFile>($, paths().dispatch(run, taskId))
+  const named = d?.worker !== undefined ? ws[d.worker] : undefined
+  const holder =
+    named && named.task === taskId && named.run === run
+      ? named
+      : Object.values(ws)
+          .filter(w => w.run === run && w.task === taskId && w.phase !== 'gone')
+          .at(-1)
   if (!holder) return fail(`no worker holds task ${taskId}`)
   const r = await recheck(holder.name)
   if (!r) return fail(`worker '${holder.name}' is no longer recorded`)
@@ -775,7 +912,7 @@ export async function recheckTask(taskId: string): Promise<Answer> {
 export async function passGate(waveId: number, note: string | undefined): Promise<Answer> {
   const $ = host()
   const p = paths()
-  const run = await currentRunId($, p)
+  const run = await currentRun()
   if (run === null) return fail('no run in progress')
   const view = await refreshRun()
   const wave = view?.waves.find(w => w.id === waveId)
@@ -796,9 +933,10 @@ export async function status(form: 'full' | 'brief' = 'full'): Promise<Answer> {
 }
 
 /** Close a scout: mark it collected (or abandoned, with a quality note) and free its worker. */
-async function closeScout(taskId: string, quality: string | null): Promise<Answer | null> {
+async function closeScout(given: string, quality: string | null): Promise<Answer | null> {
   const $ = host()
   const p = paths()
+  const taskId = scoutKey(p, given)?.key ?? given
   if (!(await $.fs.exists(p.dispatch(SCOUT_RUN, taskId)))) return fail(`no scout '${taskId}' was dispatched`)
   const holder = Object.values(await workers()).find(w => w.run === SCOUT_RUN && w.task === taskId)
   if (holder && (holder.phase === 'running' || holder.phase === 'dispatched' || holder.phase === 'checking')) {
@@ -807,15 +945,17 @@ async function closeScout(taskId: string, quality: string | null): Promise<Answe
   const closing: Closing = { at: await $.clock.now(), quality: quality ?? 'collected' }
   await writeJson($, p.collected(SCOUT_RUN, taskId), closing)
   if (quality !== null) await recordHistory(SCOUT_RUN, taskId, closing, 'abandoned')
-  if (holder) await setWorker({ ...holder, phase: holder.phase === 'gone' ? 'gone' : 'idle', task: null, run: null, diagnosis: null })
+  if (holder) await freeWorker(holder)
   return quality === null ? null : ok(`scout ${taskId} abandoned; its worker is free.`)
 }
 
 export async function collect(taskId: string): Promise<Answer> {
   const $ = host()
   const p = paths()
-  if (isScout(taskId)) {
-    if (!SCOUT_ID.test(taskId)) return fail(`bad scout id '${taskId}'`)
+  const sk = scoutKey(p, taskId)
+  if (sk !== null) {
+    if (!SCOUT_ID.test(sk.base)) return fail(`bad scout id '${taskId}'`)
+    taskId = sk.key
     const file = p.result(SCOUT_RUN, taskId)
     if (!(await hasText($, file))) return fail(`no report from scout '${taskId}' yet (${file})`)
     const text = (await $.fs.read(file)).trim()
@@ -830,7 +970,7 @@ export async function collect(taskId: string): Promise<Answer> {
       ].join('\n'),
     )
   }
-  const run = await currentRunId($, p)
+  const run = await currentRun()
   if (run === null) return fail('no run in progress')
   if (!TASK_ID.test(taskId)) return fail(`bad task id '${taskId}'`)
   const file = p.result(run, taskId)
@@ -850,7 +990,10 @@ export async function teardown(names: string[] | undefined): Promise<Answer> {
   const p = paths()
   const files = await listWorkers($, p)
   const ws = await workers()
-  const targets = names && names.length > 0 ? names : [...new Set([...files.map(f => f.name), ...Object.keys(ws)])]
+  // No names: only this session's workers (the agents dir is shared with other leads); a name list may name any.
+  const mine = await ownedNames()
+  const onDisk = new Set(files.map(f => f.name))
+  const targets = names && names.length > 0 ? names : [...new Set([...mine, ...Object.keys(ws).filter(n => !onDisk.has(n))])]
   if (targets.length === 0) return ok('no workers on record')
   const lines: string[] = []
   for (const n of targets) {
@@ -918,14 +1061,16 @@ export async function check(): Promise<Answer> {
     }
     env.push(['herdr-core', core?.exitCode === 0 && version ? `✅ running (${version})` : '⛔ not running: start it with `hc server start`'])
   }
+  const versions = await agentVersions(cfg, true)
   const agents: string[][] = []
   for (const a of new Set(Object.values(cfg.profiles).map(pr => pr.agent))) {
     const spec = cfg.agents[a]
     if (spec?.launch === 'subagent') agents.push([a, 'subagent', '✅ a Claude Code subagent of this session'])
     else if (!spec) agents.push([a, '', '⛔ unknown agent'])
-    else agents.push([a, spec.launch, (await which(spec.bin)) ? `✅ ${code(spec.bin)}` : `⛔ missing ${code(spec.bin)}`])
+    else agents.push([a, spec.launch, (await which(spec.bin)) ? `✅ ${code(spec.bin)}${versions[a] ? ` ${versions[a]}` : ''}` : `⛔ missing ${code(spec.bin)}`])
   }
   const problems = configProblems(cfg)
+  const reporting = 'error' in kind ? [] : statusReportProblems(cfg, kind.kind, versions)
   const profiles = Object.entries(cfg.profiles).map(([n, pr]) => [
     n,
     pr.agent,
@@ -940,6 +1085,7 @@ export async function check(): Promise<Answer> {
     '',
     table(['Check', 'Result'], env),
     ...(problems.length > 0 ? ['', '### Problems', '', ...problems.map(pr => `- ⛔ ${pr}`)] : []),
+    ...(reporting.length > 0 ? ['', '### Status reporting', '', ...reporting.map(pr => `- ⚠️ ${pr}`), '', 'Routing skips profiles of those agents and falls through to the next in the category.'] : []),
     '',
     '### Agents',
     '',
@@ -968,4 +1114,203 @@ export async function quotaReport(): Promise<Answer> {
   return ok(formatQuota(cfg, await host().state.quota.get()))
 }
 
-export { diagnoseWorker }
+// ------------------------------------------------------------------ status capability (T7)
+
+const VERSION = /\d+(?:\.\d+)+(?:-\d+)?/
+
+/** Each used agent's version (null: unknown), from its `version_cmd`; cached for the session, `refresh` reads again. */
+export async function agentVersions(cfg: Config, refresh = false): Promise<Record<string, string | null>> {
+  if (rt.versions !== null && !refresh) return rt.versions
+  const $ = host()
+  const out: Record<string, string | null> = {}
+  for (const name of new Set(Object.values(cfg.profiles).map(pr => pr.agent))) {
+    const cmd = cfg.agents[name]?.version_cmd
+    if (!cmd || cmd.length === 0) continue
+    const r = await $.process.run(cmd, { timeoutMs: 8_000 }).catch(() => null)
+    out[name] = r !== null && r.exitCode === 0 ? (VERSION.exec(`${r.stdout}\n${r.stderr}`)?.[0] ?? null) : null
+  }
+  rt.versions = out
+  return out
+}
+
+/** Profiles whose agent cannot report status on the backend in use (so routing falls through them). */
+export async function unusableProfiles(cfg: Config): Promise<Set<string>> {
+  const out = new Set<string>()
+  const declared = Object.values(cfg.agents).some(a => a.reports !== undefined || a.min_version !== undefined)
+  if (!declared) return out
+  const kind = await backendOf(cfg)
+  if ('error' in kind) return out
+  const versions = await agentVersions(cfg)
+  for (const [name, pr] of Object.entries(cfg.profiles)) {
+    const only: Config = { ...cfg, profiles: { [name]: pr } }
+    if (statusReportProblems(only, kind.kind, versions).length > 0) out.add(name)
+  }
+  return out
+}
+
+// ------------------------------------------------------------------ lifecycle: approve, finish, close
+
+const iso = async () => new Date(await host().clock.now()).toISOString()
+
+export type Approved = Answer & { wake?: string }
+
+/** Finished: finished.json exists (omh_status finish). */
+async function isFinished(run: string): Promise<boolean> {
+  return host().fs.exists(`${paths().run(run)}/finished.json`)
+}
+
+/**
+ * /omh approve [run] [force]: approve a draft and bind this session to the run, wherever it works (the main checkout or a
+ * worktree the user made): its dispatch, status and plan follow that run from then on, not the shared current-run.
+ *   - unbound: no id approves this session's open run, an id approves that run; either way this session is now its lead.
+ *   - bound: no id (or its own id) approves its run again. Another run is refused until its own run is finished
+ *     or closed; then it rebinds.
+ *   - a run another live session leads is refused unless `force`, which takes it over (that lead's close then no longer touches it).
+ * `wake` is what to send the lead, if anything. Nothing stops two leads in one checkout.
+ */
+export async function approveRun(runId?: string, force = false): Promise<Approved> {
+  const $ = host()
+  const p = paths()
+  const explicit = runId !== undefined && runId.trim() !== ''
+  const target = explicit ? await findRun($, p, runId.trim()) : await openRun()
+  if (target !== null) {
+    if (await isClosed(target)) return fail(`run ${target} is closed. Draft new work with a "name" (omh_status action "draft") and approve that.`)
+    const other = await otherLiveLead(target)
+    if (other !== null && !force) {
+      return fail(`run ${target} is led by a live session (${other}). Approve it from there, or take it over with "/omh approve ${target} force".`)
+    }
+    if (p.boundRun !== null && target !== p.boundRun && !(await isClosed(p.boundRun)) && !(await isFinished(p.boundRun))) {
+      return fail(
+        `this session is bound to run ${p.boundRun}, which is neither finished nor closed. Finish it (omh_status finish) and close it (/omh close) first, or approve ${target} from another Claude.`,
+      )
+    }
+  }
+  const a = await approvePlan(target ?? runId)
+  if (!a.ok || a.run === undefined) return a
+  const run = a.run
+  await logEvent('approved', run, { file: a.file, ...(force && { force: true }) })
+  // A plan.json that already exists means this is a re-approval: the waves are derived, so the lead carries on.
+  const next = (await $.fs.exists(p.plan(run)))
+    ? `plan.json already exists: continue the current wave (omh_status shows it); call omh_status action "plan" again only if the edit changed the tasks.`
+    : `Derive the waves from ${a.file} with omh_status action "plan", then dispatch the first wave.`
+  // The same session approving again (after editing plan.md) keeps its binding.
+  if (p.boundRun === run) {
+    return { ok: true, text: a.text, wake: `plan.md of ${run} approved again. ${next}` }
+  }
+  await bindRun(run, p.root)
+  return {
+    ok: true,
+    text: `${a.text}\nthis session now leads ${run}, in ${p.root}.`,
+    wake: `plan.md approved (/omh approve). You now lead run ${run}, working in ${p.root}. ${next}`,
+  }
+}
+
+type Dropped = { run: string; text: string; wake?: string }
+
+const sessionTag = () => (leadId() ?? 'lead').replace(/[^A-Za-z0-9_-]/g, '_')
+
+/** An approval for a run nobody is bound to: plan.md is written and the event logged; the session that later runs /omh approve <run> binds. */
+async function approveUnbound(run: string): Promise<Approved> {
+  const a = await approvePlan(run)
+  if (!a.ok || a.run === undefined) return a
+  await logEvent('approved', a.run, { file: a.file, drop: true })
+  return { ok: true, text: `${a.text}\nNo session leads ${a.run} yet: /omh approve ${a.run} in the Claude that will lead it.` }
+}
+
+/**
+ * Approvals dropped as files (.omh/approvals/<run> holding the draft digest) by something outside: a good
+ * digest approves the run, a bad one renames the file to <run>.rejected. A session claims a file by an atomic
+ * rename first, so two sessions never both act on it. The session bound to the run, or the unbound one drafting
+ * it (its open run), approves it with approveRun: that binds and wakes it. A run nobody is bound to or drafting is
+ * approved without binding, by whichever session claims it first; a run another live session is bound to is left
+ * for that session, and so is the current-run draft of a (possibly unbound) session, when this one is bound elsewhere.
+ * A file for a closed run is rejected.
+ */
+export async function pollApprovals(): Promise<Dropped[]> {
+  const $ = host()
+  const p = paths()
+  const dir = `${p.omh}/approvals`
+  let entries: { name: string; kind: string }[]
+  try {
+    entries = await $.fs.list(dir)
+  } catch {
+    return []
+  }
+  // Nothing to claim: no run lookups on the idle poll.
+  entries = entries.filter(e => e.kind === 'file' && !e.name.includes('.claimed-') && !e.name.endsWith('.rejected'))
+  if (entries.length === 0) return []
+  const done: Dropped[] = []
+  for (const e of entries) {
+    const run = e.name
+    const closed = await isClosed(run)
+    const mine = !closed && (p.boundRun === run || (p.boundRun === null && (await openRun()) === run))
+    if (!closed && !mine) {
+      if ((await otherLiveLead(run)) !== null) continue // another live session's run: leave the file for it
+      // A bound session leaves the shared current-run draft to the unbound session that is drafting it.
+      if (p.boundRun !== null && (await $.fs.read(p.currentRun).catch(() => '')).trim() === run && (await readLead(run)) === null) continue
+    }
+    const claimed = `${dir}/${run}.claimed-${sessionTag()}`
+    const mv = await $.process.run(['mv', `${dir}/${run}`, claimed], { timeoutMs: 5_000 }).catch(() => null)
+    if (mv === null || mv.exitCode !== 0) continue // another session got it
+    const digest = (await $.fs.read(claimed).catch(() => '')).trim()
+    const draft = await readText($, p.draft(run))
+    if (closed || draft === null || draftDigest(draft) !== digest) {
+      const why = closed ? 'the run is closed' : draft === null ? 'no draft' : 'the digest does not match the draft'
+      await $.process.run(['mv', claimed, `${dir}/${run}.rejected`], { timeoutMs: 5_000 }).catch(() => null)
+      await logEvent('approval_rejected', run, { digest })
+      $.ui.log(`oh-my-herdr: approval for ${run} rejected: ${why}`)
+      done.push({ run, text: `approval for ${run} rejected: ${why}` })
+      continue
+    }
+    await remove($, claimed)
+    const a = mine ? await approveRun(run) : await approveUnbound(run)
+    done.push({ run, text: a.text, ...(a.wake !== undefined && { wake: a.wake }) })
+  }
+  return done
+}
+
+/** omh_status finish: the run's last gate has passed: record finished.json. The user then closes the run. */
+export async function finishRun(): Promise<Answer> {
+  const $ = host()
+  const p = paths()
+  const run = p.boundRun ?? (await currentRun())
+  if (run === null) return fail('no run to finish: this session has no plan.json run')
+  const plan = await loadPlan(run)
+  if (!plan) return fail(`run ${run} has no plan.json`)
+  const gates = await readGates($, p, run)
+  const open = plan.waves.filter(w => !gates.has(w.id))
+  if (open.length > 0) return fail(`wave(s) ${open.map(w => w.id).join(', ')} of run ${run} have no passed gate yet: verify them and use omh_status action "gate" first`)
+  await writeJson($, `${p.run(run)}/finished.json`, { at: await iso() })
+  await logEvent('finished', run)
+  return ok(`run ${run} finished. The user closes it with /omh close (nothing is merged or removed).`)
+}
+
+/**
+ * /omh close [run] [force]: tear down the run's workers, write closed.json, and unbind this session if it
+ * is bound to the run. Never touches git. An unfinished run needs force.
+ */
+export async function closeRun(runId?: string, force = false): Promise<Answer> {
+  const $ = host()
+  const p = paths()
+  const run = runId !== undefined && runId.trim() !== '' ? await findRun($, p, runId.trim()) : (p.boundRun ?? (await openRun()))
+  if (run === null) return fail(`no run${runId ? ` '${runId}'` : ''} to close`)
+  if (await isClosed(run)) return fail(`run ${run} is already closed`)
+  if (!(await isFinished(run)) && !force) return fail(`run ${run} is not finished (no omh_status finish yet). Close it anyway with "/omh close ${run} force".`)
+  // Another live lead is still bound to this run: only force closes it from here.
+  const other = await otherLiveLead(run)
+  if (other !== null && !force && p.boundRun !== run) {
+    return fail(`run ${run} is led by a live session (${other}), not this one. Close it from there, or take it over with "/omh close ${run} force".`)
+  }
+  const mine = Object.values(await workers()).filter(w => w.run === run).map(w => w.name)
+  const files = (await listWorkers($, p)).filter(f => f.run === run).map(f => f.name)
+  const names = [...new Set([...mine, ...files])]
+  const lines: string[] = []
+  if (names.length > 0) lines.push((await teardown(names)).text)
+  await writeJson($, `${p.run(run)}/closed.json`, { at: await iso(), forced: force })
+  await logEvent('closed', run, { forced: force })
+  await remove($, p.runStatus(run)) // a closed run leaves the status summary
+  if (p.boundRun === run) await unbindRun()
+  else await refreshRun()
+  lines.push(`run ${run} closed.`)
+  return ok(lines.join('\n'))
+}

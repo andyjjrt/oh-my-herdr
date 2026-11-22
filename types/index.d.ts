@@ -20,6 +20,7 @@ export type OmhVerdict =
   | 'config-error'
   | 'crashed'
   | 'interrupted'
+  | 'no-status-report' // never reported a status to hc while starting
   | 'unknown'
 
 export type OmhDiagnosis = { verdict: OmhVerdict; evidence: string; hint: string; at: number }
@@ -58,6 +59,18 @@ export type OmhRunView = { id: string; dir: string; goal: string; current: numbe
 
 export type OmhWake = { sections: string[]; settleKey: string }
 
+/** The run a session is bound to, and the checkout it works in (the main checkout, or a worktree the user made). */
+export type OmhBoundRun = { run: string; root: string }
+
+/** One active run in .omh/status.json's summary. */
+export type OmhRunSummary = {
+  id: string
+  goal: string
+  done: number
+  total: number
+  state: 'draft' | 'approved' | 'running' | 'finished'
+}
+
 export type OmhQuotaWindow = { name: string; usedPercent: number; resetsAt: string | null; scope: string | null }
 
 export type OmhQuota = {
@@ -78,6 +91,8 @@ declare module 'claude-code' {
       continueCount: number
       /** Wake-ups not yet sent to the lead, and the last wave state it was told about. Kept here so a reload loses neither. */
       wake: Shaped<OmhWake>
+      /** The session's run binding: its files win over .omh/current-run, and its root over this checkout. */
+      bound: Shaped<OmhBoundRun | null>
       boardOpen: boolean
     }
   }

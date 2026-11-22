@@ -3,9 +3,13 @@
 #
 #   omh-wave [dir]            the ready line, e.g. "██░░░░ 2/5" or "██░░░░ 2/5 ⚠1"; nothing when no run is open
 #   omh-wave --json [dir]     the whole .omh/status.json
-#   omh-wave --field F [dir]  one field: run goal wave waves done total alerts wave_done wave_total line updated_at stage
+#   omh-wave --runs [dir]     one line per active run: <id> <state> <done>/<total> <goal>
+#   omh-wave --field F [dir]  one field: run goal wave waves done total alerts wave_done wave_total line updated_at stage runs
 #
-# dir defaults to the current directory; the nearest .omh/status.json at or above it is used.
+# dir defaults to the current directory; OMH_DIR (as the mod reads it) names the .omh directory when set; the nearest .omh/status.json at or above it is used, and
+# in a linked worktree the main checkout's .omh when there is none above. The run bound to this
+# checkout (.omh/runs/<run>/lead.json whose `root` is the git toplevel, not closed) comes first.
+# .omh/status.json is the summary: the unbound (main) session's run at the top, plus `runs` for every active run.
 # The mod (hooks/lib/runtime.ts) keeps that file current while a run is open and removes it after.
 # Exit status is 0 either way, so a status line never shows an error.
 
@@ -13,24 +17,65 @@ mode=line
 field=
 case "$1" in
   --json) mode=json; shift ;;
+  --runs) mode=runs; shift ;;
   --field) mode=field; field=$2; shift 2 ;;
-  -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
-dir=${1:-$PWD}
+start=${1:-$PWD}
+dir=$start
 file=
-while :; do
+# The run bound to this checkout: the open run (no closed.json) whose runs/*/lead.json `root` is the
+# current git toplevel, the most recently modified lead.json if several; its own status.json comes
+# first. This works the same in the main checkout and in any worktree; lead.json files without
+# `root` are skipped. .omh is found through the git common dir (a worktree has none of its own).
+top=$(git -C "$start" rev-parse --show-toplevel 2>/dev/null) || top=
+common=$(git -C "$start" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
+omh=${OMH_DIR:-}
+if [ -z "$omh" ]; then
+  case "$common" in
+    */.git) omh=${common%/.git}/.omh ;;
+  esac
+fi
+# --runs and --field runs list every active run: always the summary, whichever run this checkout is bound to.
+if { [ "$mode" = runs ] || { [ "$mode" = field ] && [ "$field" = runs ]; }; } && [ -f "$omh/status.json" ]; then
+  file=$omh/status.json
+fi
+if [ -z "$file" ] && [ -n "$top" ] && [ -d "$omh/runs" ]; then
+  leads=$(ls -t "$omh"/runs/*/lead.json 2>/dev/null)
+  file=$(printf '%s\n' "$leads" | while IFS= read -r lead; do
+    [ -n "$lead" ] || continue
+    rd=${lead%/lead.json}
+    [ -f "$rd/closed.json" ] && continue
+    [ -f "$rd/status.json" ] || continue
+    if command -v jq >/dev/null 2>&1; then
+      root=$(jq -r '.root // empty' "$lead" 2>/dev/null) || root=
+    else
+      root=$(sed -n 's/^ *"root": *"\(.*\)",\{0,1\} *$/\1/p' "$lead" | head -n 1)
+    fi
+    if [ -n "$root" ] && [ "$root" = "$top" ]; then printf '%s' "$rd/status.json"; break; fi
+  done)
+fi
+while [ -z "$file" ]; do
   if [ -f "$dir/.omh/status.json" ]; then file=$dir/.omh/status.json; break; fi
   [ "$dir" = / ] || [ -z "$dir" ] && break
   dir=$(dirname "$dir")
 done
+# A worktree has no .omh of its own: the mod keeps it in the main checkout (or in OMH_DIR).
+if [ -z "$file" ] && [ -f "$omh/status.json" ]; then file=$omh/status.json; fi
 [ -n "$file" ] || exit 0
 
 case $mode in
-  json) cat "$file" ;;
+  json) cat "$file"; exit 0 ;;
+  runs)
+    # The runs array is JSON, so only jq can read it; without jq the status line still works.
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '.runs[]? | "\(.id) \(.state) \(.done)/\(.total) \(.goal)"' "$file" 2>/dev/null
+    fi
+    exit 0
+    ;;
   line) field=line ;;
 esac
-[ "$mode" = json ] && exit 0
 
 if command -v jq >/dev/null 2>&1; then
   jq -r --arg f "$field" '.[$f] // empty' "$file" 2>/dev/null

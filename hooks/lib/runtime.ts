@@ -2,16 +2,18 @@
 // Module variables reset on every hot reload; `session.start` runs again and calls `init`, which
 // rebuilds everything from $.state (kept across reloads) and the .omh/ files.
 
-import type { PluginOptions } from 'claude-code'
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, PluginOptions } from 'claude-code'
 
 import type { Engine } from './engine'
 
-import type { OmhDiagnosis, OmhQuota, OmhRunView, OmhWorker } from '../../types'
+import type { OmhBoundRun, OmhDiagnosis, OmhQuota, OmhRunSummary, OmhRunView, OmhWorker } from '../../types'
 import { type BackendSetting, type Config, loadConfig } from './config'
 import { diagnose, excerpt } from './diagnose'
-import { appendLine, currentRunId, hasText, openRunId, listWorkers, Paths, readGates, readJson, remove, type Closing, type DispatchFile, writeJson } from './files'
-import { agentStatus, readScreen, watchArgv } from './backend'
-import { notify } from './herdr'
+import { appendLine, currentRunId, hasText, openRunId, listWorkers, ownsWorker, Paths, readGates, readJson, remove, type Closing, type DispatchFile, writeJson } from './files'
+import { agentStatus, paneExists, readScreen, watchArgv } from './backend'
+import { isHcPane } from './hc'
+import { notify, tabPanes } from './herdr'
 import { type OmhStatusFile, type Plan, parsePlan, planningStatusFile, runView, SCOUT_RUN, statusFile, type TaskFacts } from './plan'
 import { probe, providerOf, providersOf, quotaAllows, type Provider } from './quota'
 import { ACTIVE, newWorker, type SettleEffect, type SettleEvent, step } from './settle'
@@ -47,10 +49,28 @@ export function optionsOf(o: PluginOptions): Options {
 export const GRACE_MS = 45_000
 export const DEFAULT_STALL_MS = 30_000
 
+/** $.state.bound: the run this session follows, seeded from OMH_RUN at boot or set by bindRun. */
+const BOUND = atom({ plugin: 'oh-my-herdr', key: 'bound' } as const, null, { shape: 'bound-1' })
+
+type Cell<T> = { get: () => Promise<T>; set: (fn: (old: T) => T) => Promise<T> }
+
+/** The engine facade plus this session's binding; engine.ts keeps no atom of its own for it. */
+export type Host = Engine & { state: Engine['state'] & { bound: Cell<OmhBoundRun | { run: null } | null> } }
+
+export function bindHost(base: Engine, $: EngineInterface): Host {
+  return {
+    ...base,
+    state: {
+      ...base.state,
+      bound: { get: () => read($, BOUND), set: fn => update($, BOUND, fn) },
+    },
+  }
+}
+
 type Timer = { cancel: () => void }
 
 export const rt = {
-  $: null as Engine | null,
+  $: null as Host | null,
   options: optionsOf({}),
   paths: null as Paths | null,
   cfg: null as Config | null,
@@ -71,9 +91,79 @@ export const rt = {
   subagentEnds: new Map<string, { reason: string; answer: string }>(),
   /** Polls $.agent.list() while a subagent worker is out. */
   pollTimer: null as Timer | null,
+  /**
+   * Queued wake-up text -> a check run when it is sent: null drops it (its worker no longer holds the
+   * task). Closures die with a hot reload; the serializable `WakeSpec` kept in $.state.wake does not.
+   */
+  wakeGuards: new Map<string, () => Promise<string | null>>(),
+  /** Pane -> whether it existed when last asked (liveWorkersAll), so dispatch does not ask the backend every time. */
+  paneSeen: new Map<string, { at: number; exists: boolean }>(),
+  /** Each agent's version (null: unknown), read once per session by `agentVersions`. */
+  versions: null as Record<string, string | null> | null,
 }
 
-export function host(): Engine {
+/**
+ * Append one line to .omh/events.jsonl: the hook points for what sits around the mod (an inbox, a
+ * bot). Never throws: an event is a nicety.
+ */
+export async function logEvent(event: string, run: string | null, detail: Record<string, unknown> = {}): Promise<void> {
+  try {
+    const $ = rt.$
+    const p = rt.paths
+    if ($ === null || p === null) return
+    const session = leadId() ?? 'lead'
+    const line = JSON.stringify({ at: new Date(await $.clock.now()).toISOString(), run, event, session, ...detail })
+    await appendLine($, `${p.omh}/events.jsonl`, line)
+  } catch {
+    // never into the caller
+  }
+}
+
+/** This session's stable identity, written to the worker files it starts (`lead`) and to lead.json: its pane address; null when it runs outside herdr and hc. */
+export function leadId(): string | null {
+  return rt.selfPane ?? (rt.selfTerminal !== null ? `hc:${rt.selfTerminal}` : null)
+}
+
+/** runs/<run>/lead.json: the session bound to the run and the checkout it works in. */
+export type LeadFile = { pane: string | null; root?: string }
+
+export async function readLead(run: string): Promise<LeadFile | null> {
+  return readJson<LeadFile>(host(), `${paths().run(run)}/lead.json`)
+}
+
+/** Whether the pane a lead.json names still exists (an hc terminal is recorded as `hc:<id>`). */
+export async function leadLive(pane: string): Promise<boolean> {
+  return paneExists(host(), pane).catch(() => false)
+}
+
+export async function isClosed(run: string): Promise<boolean> {
+  return host().fs.exists(`${paths().run(run)}/closed.json`)
+}
+
+/** The live lead another session has bound to `run` (its lead.json pane), or null: no lead.json, closed, this session's own, or its pane gone. */
+export async function otherLiveLead(run: string): Promise<string | null> {
+  if (await isClosed(run)) return null
+  const lead = await readLead(run)
+  if (lead === null || lead.pane === null || lead.pane === leadId()) return null
+  return (await leadLive(lead.pane)) ? lead.pane : null
+}
+
+/**
+ * This session's open run (files.openRunId): the bound one, else current-run unless it is closed or another
+ * live lead is bound to it (an unbound session never follows a run into somebody else's hands).
+ */
+export async function openRun(): Promise<string | null> {
+  const id = await openRunId(host(), paths())
+  return id !== null && paths().boundRun === null && (await otherLiveLead(id)) !== null ? null : id
+}
+
+/** The run tasks are dispatched in (files.currentRunId), by the same rule as openRun. */
+export async function currentRun(): Promise<string | null> {
+  const id = await currentRunId(host(), paths())
+  return id !== null && paths().boundRun === null && (await otherLiveLead(id)) !== null ? null : id
+}
+
+export function host(): Host {
   if (rt.$ === null) throw new Error('oh-my-herdr is not bound to a session yet')
   return rt.$
 }
@@ -81,6 +171,104 @@ export function host(): Engine {
 export function paths(): Paths {
   if (rt.paths === null) throw new Error('oh-my-herdr has no project paths yet')
   return rt.paths
+}
+
+/**
+ * Bind this session to `run`, working in `root` (its own checkout, the main one or a worktree the user made):
+ * the run's files win over .omh/current-run. .omh stays central. Records the session in
+ * runs/<run>/lead.json ({ pane, root }), which /omh runs and the status line read.
+ */
+export async function bindRun(run: string, root: string): Promise<void> {
+  const $ = host()
+  const from = paths()
+  rt.paths = new Paths(root, from.omh, run)
+  await $.state.bound.set(() => ({ run, root }))
+  await writeLeadFile(run, root)
+  if (from.boundRun !== run) await carryTabs(from, rt.paths)
+  await refreshRun()
+  await logEvent('bound', run, { root })
+}
+
+/** runs/<run>/lead.json: the lead session bound to the run and the checkout it works in. Never throws. */
+export async function writeLeadFile(run: string, root: string): Promise<void> {
+  try {
+    await writeJson(host(), `${paths().run(run)}/lead.json`, { pane: leadId(), root })
+  } catch (err) {
+    log(`could not write lead.json of ${run}: ${(err as Error).message}`)
+  }
+}
+
+type TabRecord = { tab: string; root_pane: string; used?: boolean }
+
+/**
+ * N4: the omh-workers tabs of the session's current scope (the project's `.omh/tab.json` when unbound, the
+ * bound run's `tab.json` otherwise). When the session binds to a run (or rebinds from another), the tabs holding
+ * its own workers are carried over to the new run's `runs/<run>/tab.json` (what `paths().tab` points at once
+ * bound), so the run's later workers reuse them and they are not orphaned; the rest stay where they are for
+ * whoever else uses them. Tabs no longer there are dropped. Carried over rather than closed: the panes still hold live workers.
+ */
+async function carryTabs(from: Paths, to: Paths): Promise<void> {
+  const $ = host()
+  try {
+    const raw = await readJson<TabRecord | { tabs: TabRecord[] }>($, from.tab)
+    const records: TabRecord[] = raw === null ? [] : 'tabs' in raw ? raw.tabs : [raw]
+    if (records.length === 0) return
+    const mine = Object.values(await workers()).filter(w => w.phase !== 'gone')
+    const paneOf = new Set(mine.map(w => w.pane))
+    const hasHc = mine.some(w => isHcPane(w.pane))
+    const carry: TabRecord[] = []
+    const keep: TabRecord[] = []
+    for (const r of records) {
+      let panes: string[] | null = []
+      try {
+        panes = await tabPanes($, r.tab)
+      } catch {
+        panes = [] // unreadable (an hc tab, or herdr away): fall back to the guess below
+      }
+      if (panes === null) continue // the tab is gone
+      if (panes.some(x => paneOf.has(x)) || (panes.length === 0 && hasHc)) carry.push(r)
+      else keep.push(r)
+    }
+    if (carry.length === 0) return
+    const there = await readJson<{ tabs: TabRecord[] }>($, to.tab)
+    const have = there?.tabs ?? []
+    await writeJson($, to.tab, { tabs: [...have, ...carry.filter(r => !have.some(h => h.tab === r.tab))] })
+    if (keep.length === 0) await remove($, from.tab)
+    else await writeJson($, from.tab, { tabs: keep })
+  } catch (err) {
+    log(`could not carry the workers tabs over: ${(err as Error).message}`)
+  }
+}
+
+/**
+ * A bound session loses its binding, with one wake-up saying why, when its run was closed from another session or
+ * another live session took it over (`/omh approve <run> force` rewrote lead.json). Cheap while nothing changed:
+ * a file read, and only a different pane in lead.json asks the backend whether it is alive.
+ */
+export async function dropLostBinding(): Promise<boolean> {
+  const run = paths().boundRun
+  if (run === null) return false
+  let why: string
+  if (await isClosed(run)) why = `was closed from another session`
+  else {
+    const other = await otherLiveLead(run)
+    if (other === null) return false
+    why = `was taken over by the session in ${other}`
+  }
+  await unbindRun()
+  await queueWake(`[oh-my-herdr] Run ${run} ${why}: this session no longer leads it. Stop dispatching into it. Draft new work with omh_status action "draft" (a "name") and have the user approve it.`)
+  return true
+}
+
+/** Unbind the session: it follows .omh/current-run again, in the same checkout. */
+export async function unbindRun(): Promise<void> {
+  const $ = host()
+  const base = paths()
+  const was = base.boundRun
+  rt.paths = new Paths(base.root, base.omh)
+  await $.state.bound.set(() => ({ run: null })) // explicit: a reload must not re-seed it from OMH_RUN
+  await refreshRun()
+  await logEvent('unbound', was, { root: base.root })
 }
 
 export async function config(): Promise<Config> {
@@ -105,6 +293,37 @@ export async function workers(): Promise<Record<string, OmhWorker>> {
 
 export async function setWorker(w: OmhWorker): Promise<void> {
   await host().state.workers.set(all => ({ ...all, [w.name]: w }))
+}
+
+/**
+ * Live workers across every run (a file not yet in $.state counts as live), for a global
+ * max_concurrent. Workers whose phase is `gone` are left out.
+ */
+export async function liveWorkersAll(): Promise<number> {
+  const $ = host()
+  const known = await workers()
+  const files = await listWorkers($, paths())
+  const now = await $.clock.now()
+  let n = 0
+  for (const f of files) {
+    // Gone for this session only when it is the same pane: another lead may have reused the name.
+    const was = known[f.name]
+    if (was?.phase === 'gone' && (was.pane === undefined || was.pane === f.pane)) continue
+    if (await paneLive(f.pane, now)) n++
+  }
+  return n
+}
+
+const PANE_TTL_MS = 30_000
+
+/** Whether a worker's pane still exists, asked of the backend at most every 30 s; unknown counts as live. */
+async function paneLive(pane: string, now: number): Promise<boolean> {
+  if (isSubagentPane(pane)) return true // an in-process subagent has no pane to ask
+  const seen = rt.paneSeen.get(pane)
+  if (seen !== undefined && now - seen.at < PANE_TTL_MS) return seen.exists
+  const exists = await paneExists(host(), pane).catch(() => true)
+  rt.paneSeen.set(pane, { at: now, exists })
+  return exists
 }
 
 export async function dropWorker(name: string): Promise<void> {
@@ -294,7 +513,14 @@ async function raise(w: OmhWorker, phase: string, diag: OmhDiagnosis): Promise<v
   }
   const screen =
     diag.verdict === 'unknown' ? diag.evidence : isSubagentWorker(w) ? excerpt(await subagentScreenOf(w), 10) : excerpt(await readScreen($, w.pane, 40).catch(() => ''), 10)
-  await queueWake(alertText(w, phase, diag, screen))
+  await logEvent('alert', w.run, { worker: w.name, task: w.task, phase, verdict: diag.verdict })
+  // Stale by send time (the task moved to another worker, or this one was torn down): dropped.
+  await queueWake(alertText(w, phase, diag, screen), async () => {
+    const cur = (await workers())[w.name]
+    if (!cur || cur.task !== w.task) return null
+    if (phase !== 'gone' && cur.phase !== phase) return null
+    return alertText(cur, phase, diag, screen)
+  }, { kind: 'worker', name: w.name, task: w.task, phase })
   // An alert can be the last thing the wave (or the scouts) was waiting on.
   await (w.run === SCOUT_RUN ? maybeScoutsSettled() : maybeWaveSettled())
 }
@@ -339,8 +565,9 @@ export async function loadPlan(run: string): Promise<Plan | null> {
 /** Rebuild the run view from the files and the workers; returns it. */
 export async function refreshRun(): Promise<OmhRunView | null> {
   const $ = host()
+  if (await dropLostBinding()) return refreshRun()
   const p = paths()
-  const id = await currentRunId($, p)
+  const id = await currentRun()
   const plan = id === null ? null : await loadPlan(id)
   if (id === null || plan === null) {
     await $.state.run.set(() => null)
@@ -379,25 +606,126 @@ export async function refreshRun(): Promise<OmhRunView | null> {
 async function planningStatus(): Promise<OmhStatusFile | null> {
   const $ = host()
   const p = paths()
-  const run = await openRunId($, p)
+  const run = await openRun()
   if (run === null) return null
   const drafting = await hasText($, p.draft(run))
   if (!drafting && !(await hasText($, p.planMd(run)))) return null
   const text = drafting ? await $.fs.read(p.draft(run)) : await $.fs.read(p.planMd(run))
-  const goal = text.trim().split('\n').find(l => l.trim() !== '')?.replace(/^#+\s*/, '') ?? run
+  const goal = goalOf(text, run)
   return planningStatusFile(run, goal, drafting ? 'draft' : 'approved', new Date(await $.clock.now()))
 }
 
-/** Write .omh/status.json for a custom status line, or remove it when there is nothing to show. */
+/** A run's first non-blank line without its heading marks: its goal when no plan.json says it. */
+function goalOf(text: string, fallback: string): string {
+  const line = text.trim().split('\n').find(l => l.trim() !== '')
+  return line ? line.replace(/^#+\s*/, '').trim() || fallback : fallback
+}
+
+/** The summary row for the run this session refreshed, or null when it has nothing to show. */
+function currentSummary(view: OmhRunView | null, file: OmhStatusFile | null): OmhRunSummary | null {
+  if (view !== null) {
+    const total = view.waves.reduce((n, w) => n + w.tasks.length, 0)
+    const done = view.waves.filter(w => w.gatePassed).reduce((n, w) => n + w.tasks.length, 0)
+    return { id: view.id, goal: view.goal, done, total, state: view.current === null ? 'finished' : 'running' }
+  }
+  if (file !== null) {
+    const state = file.stage === 'draft' ? 'draft' : file.stage === 'approved' ? 'approved' : 'running'
+    return { id: file.run, goal: file.goal, done: file.done, total: file.total, state }
+  }
+  return null
+}
+
+/** A run's row in .omh/status.json, from its own files: draft, approved, running or finished. */
+async function runSummary($: Engine, p: Paths, id: string): Promise<OmhRunSummary | null> {
+  const file = await readJson<OmhStatusFile>($, p.runStatus(id))
+  if (file !== null && typeof file.run === 'string') {
+    const state = file.stage === 'draft' ? 'draft' : file.stage === 'approved' ? 'approved' : 'running'
+    return { id, goal: file.goal, done: file.done, total: file.total, state }
+  }
+  const plan = await readJson<Plan>($, p.plan(id))
+  if (plan !== null && Array.isArray(plan.waves)) {
+    const gates = await readGates($, p, id)
+    const waves = plan.waves.filter(w => Array.isArray(w.tasks))
+    const total = waves.reduce((n, w) => n + w.tasks.length, 0)
+    const done = waves.filter(w => gates.has(w.id)).reduce((n, w) => n + w.tasks.length, 0)
+    return { id, goal: typeof plan.goal === 'string' && plan.goal.trim() !== '' ? plan.goal : id, done, total, state: total > 0 && done >= total ? 'finished' : 'running' }
+  }
+  if (await hasText($, p.planMd(id))) {
+    return { id, goal: goalOf(await $.fs.read(p.planMd(id)).catch(() => ''), id), done: 0, total: 0, state: 'approved' }
+  }
+  if (await hasText($, p.draft(id))) {
+    return { id, goal: goalOf(await $.fs.read(p.draft(id)).catch(() => ''), id), done: 0, total: 0, state: 'draft' }
+  }
+  return null
+}
+
+/** Every active run (draft, approved, running) under .omh/runs, the current one included as refreshed. */
+async function activeRunRows($: Engine, p: Paths, current: OmhRunSummary | null): Promise<OmhRunSummary[]> {
+  let entries: { name: string; kind: string }[] = []
+  try {
+    entries = await $.fs.list(p.runs)
+  } catch {
+    // no runs yet
+  }
+  const rows: OmhRunSummary[] = []
+  for (const entry of entries) {
+    if (entry.kind !== 'dir' || entry.name === SCOUT_RUN) continue
+    if (await $.fs.exists(`${p.run(entry.name)}/closed.json`)) continue
+    if (current !== null && current.id === entry.name) {
+      if (current.state !== 'finished') rows.push(current)
+      continue
+    }
+    const row = await runSummary($, p, entry.name)
+    if (row !== null && row.state !== 'finished') rows.push(row)
+  }
+  if (current !== null && current.state !== 'finished' && !rows.some(r => r.id === current.id) && !(await $.fs.exists(`${p.run(current.id)}/closed.json`))) rows.push(current)
+  return rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
+/**
+ * Write the run's own status under runs/<run>/ and .omh/status.json: the current/bound run's fields
+ * (so statusline/omh-wave keeps working) plus every active run. Removed when there is nothing to show.
+ */
 async function publishStatus(view: OmhRunView | null, planning: OmhStatusFile | null = null): Promise<void> {
   const $ = host()
+  const p = paths()
   const file = view === null ? planning : statusFile(view, new Date())
+  const run = file?.run ?? view?.id ?? null
   try {
-    if (file === null) await remove($, paths().status)
-    else await writeJson($, paths().status, file)
+    if (run !== null) {
+      if (file === null) await remove($, p.runStatus(run))
+      else await writeJson($, p.runStatus(run), file)
+    }
+    const rows = await activeRunRows($, p, currentSummary(view, file))
+    if (p.boundRun !== null) {
+      // The top-level fields of the summary belong to an unbound session (the main checkout's run);
+      // a bound one only keeps the `runs` array current, so it cannot overwrite what main shows.
+      const existing = await readJson<OmhStatusFile>($, p.status)
+      if (existing === null) {
+        if (rows.length > 0) await writeJson($, p.status, { ...emptyStatus(await $.clock.now()), runs: rows })
+      } else if (existing.run === '' && rows.length === 0) {
+        await remove($, p.status)
+      } else if (existing.run === p.boundRun) {
+        // A snapshot this session wrote itself before it bound (e.g. "X draft 0/0"): it is stale now.
+        await writeJson($, p.status, { ...emptyStatus(await $.clock.now()), runs: rows })
+      } else {
+        await writeJson($, p.status, { ...existing, runs: rows })
+      }
+      return
+    }
+    if (file === null && rows.length === 0) {
+      await remove($, p.status)
+      return
+    }
+    await writeJson($, p.status, { ...(file ?? emptyStatus(await $.clock.now())), runs: rows })
   } catch {
     // The status line is a nicety; a failed write must not stop the run.
   }
+}
+
+/** A summary with no run of its own at the top: only `runs` carries anything. */
+function emptyStatus(now: number): OmhStatusFile {
+  return { version: 1, run: '', goal: '', wave: 0, waves: 0, done: 0, total: 0, alerts: 0, wave_done: 0, wave_total: 0, line: '', updated_at: new Date(now).toISOString() }
 }
 
 async function maybeWaveSettled(): Promise<void> {
@@ -415,7 +743,59 @@ async function maybeWaveSettled(): Promise<void> {
     const pending = wave.tasks.length - dispatched.length
     await notify($, `omh: wave ${wave.id} settled`, `${dispatched.length} task(s) back${pending > 0 ? `, ${pending} not dispatched` : ''}`, 'done')
   }
-  await queueWake(settleText(view, wave, await workers()))
+  await logEvent('wave_settled', view.id, { wave: wave.id, tasks: dispatched.map(t => `${t.id}=${t.status}`) })
+  // Rebuilt from the live state when sent; dropped if a task was re-dispatched meanwhile.
+  const spec: WakeSpec = { kind: 'wave', run: view.id, wave: wave.id }
+  await queueWake(settleText(view, wave, await workers()), waveGuard(spec), spec)
+}
+
+/** The check a wave settle wake-up runs when sent: its text rebuilt from the live state, or null when a task is out again. */
+function waveGuard(spec: Extract<WakeSpec, { kind: 'wave' }>): () => Promise<string | null> {
+  return async () => {
+    const now = await refreshRun()
+    const w = now?.waves.find(x => x.id === spec.wave)
+    if (!now || now.id !== spec.run || !w) return null
+    const out = w.tasks.filter(t => t.status !== 'pending')
+    if (out.length === 0 || out.some(t => t.status === 'working' || t.status === 'blocked')) return null
+    return settleText(now, w, await workers())
+  }
+}
+
+/** The check an alert wake-up runs after a reload: kept while the worker still holds the task in the phase it alerted on. */
+function workerGuard(spec: Extract<WakeSpec, { kind: 'worker' }>, text: string): () => Promise<string | null> {
+  return async () => {
+    const cur = (await workers())[spec.name]
+    if (!cur || cur.task !== spec.task) return null
+    if (spec.phase !== 'gone' && cur.phase !== spec.phase) return null
+    return text
+  }
+}
+
+/**
+ * What a queued wake-up's stale check needs, as plain data: it is stored with the section in
+ * $.state.wake (sections are strings, so it travels as a prefix) and survives a hot reload.
+ */
+export type WakeSpec =
+  | { kind: 'worker'; name: string; task: string | null; phase: string }
+  | { kind: 'wave'; run: string; wave: number }
+
+const WAKE_MARK = '\u0001omh-guard:'
+const WAKE_END = '\u0001'
+
+export function encodeWake(text: string, spec: WakeSpec): string {
+  return `${WAKE_MARK}${JSON.stringify(spec)}${WAKE_END}${text}`
+}
+
+export function decodeWake(raw: string): { text: string; spec: WakeSpec | null } {
+  if (!raw.startsWith(WAKE_MARK)) return { text: raw, spec: null }
+  const end = raw.indexOf(WAKE_END, WAKE_MARK.length)
+  if (end < 0) return { text: raw, spec: null }
+  try {
+    const spec = JSON.parse(raw.slice(WAKE_MARK.length, end)) as WakeSpec
+    return { text: raw.slice(end + 1), spec }
+  } catch {
+    return { text: raw.slice(end + 1), spec: null }
+  }
 }
 
 /**
@@ -423,9 +803,10 @@ async function maybeWaveSettled(): Promise<void> {
  * sections wait in $.state, so a reload between queueing and sending loses nothing: session.start
  * calls flushWake() again.
  */
-export async function queueWake(section: string): Promise<void> {
+export async function queueWake(section: string, guard?: () => Promise<string | null>, spec?: WakeSpec): Promise<void> {
   if (!rt.options.wakeOnSettle) return
-  await host().state.wake.set(w => ({ ...w, sections: [...w.sections, section] }))
+  if (guard) rt.wakeGuards.set(section, guard)
+  await host().state.wake.set(w => ({ ...w, sections: [...w.sections, spec ? encodeWake(section, spec) : section] }))
   armWake()
 }
 
@@ -438,7 +819,18 @@ export function armWake(): void {
       const { sections } = await $.state.wake.get()
       if (sections.length === 0) return
       await $.state.wake.set(w => ({ ...w, sections: [] }))
-      await $.prompt.submit({ text: sections.join('\n\n---\n\n') })
+      // A section whose worker no longer holds its task is dropped; a settle table is rebuilt from the live state.
+      const fresh: string[] = []
+      for (const raw of sections) {
+        const { text: section, spec } = decodeWake(raw)
+        // The closure is gone after a reload; the persisted spec rebuilds the same check.
+        const guard = rt.wakeGuards.get(section) ?? (spec === null ? undefined : spec.kind === 'wave' ? waveGuard(spec) : workerGuard(spec, section))
+        rt.wakeGuards.delete(section)
+        const text = guard ? await guard().catch(() => section) : section
+        if (text !== null) fresh.push(text)
+      }
+      if (fresh.length === 0) return
+      await $.prompt.submit({ text: fresh.join('\n\n---\n\n') })
     })().catch(err => log(`wake failed: ${(err as Error).message}`))
   })
 }
@@ -632,7 +1024,8 @@ export async function recordHistory(run: string, task: string, closing: Closing,
 export async function reconcile(): Promise<void> {
   const $ = host()
   const p = paths()
-  const files = await listWorkers($, p)
+  // Only this session's workers: .omh/agents/ is shared, and another lead's must not be watched or alerted on.
+  const files = (await listWorkers($, p)).filter(f => ownsWorker(f, p, leadId()))
   const known = await workers()
   const now = await $.clock.now()
   const listed = files.some(f => isSubagentPane(f.pane)) ? await $.agent.list().catch(() => []) : []

@@ -14,6 +14,30 @@ const ICON: Record<OmhTaskStatus, string> = {
   abandoned: '✖️',
 }
 
+/**
+ * The prompt a worker is sent for a task: where its brief is, what it owns, where to write the report and the
+ * one-line reply, spelled out so the worker needs nothing from the brief to hand its result back. A subagent's
+ * final reply is the report (the mod saves it), so it is told not to write the file.
+ */
+export function handoffPrompt(o: { brief: string; result: string; owns: string[]; scout: boolean; subagent: boolean }): string {
+  const owns = o.scout ? 'no files (read-only)' : o.owns.length > 0 ? o.owns.join(', ') : 'no files listed: change nothing outside what the task needs'
+  const head = `Your task is in ${o.brief}: read it and do it. You own: ${owns}.`
+  const scout = o.scout ? ` You are a read-only scout: do not create, change or delete any project file; your only write is ${o.subagent ? 'your final reply' : o.result}.` : ''
+  if (o.subagent) {
+    return [
+      head + scout,
+      `When you are finished, or cannot continue, your final reply is your report (what you did or found, files changed, how you verified it, open questions): oh-my-herdr saves it to ${o.result}, so do not write that file yourself.`,
+      'If you cannot continue, start your final reply with `BLOCKED: <one-sentence reason>`.',
+    ].join('\n')
+  }
+  return [
+    head + scout,
+    `When you are finished, or cannot continue, write your report to ${o.result}`,
+    '(what you did or found, files changed, how you verified it, open questions),',
+    `then reply with exactly one line: DONE ${o.result} or BLOCKED <one-sentence reason>.`,
+  ].join(' ') // one line: a newline typed into a pane could submit the prompt early
+}
+
 export function alertText(w: OmhWorker, phase: string, d: OmhDiagnosis, screen: string): string {
   return [
     `[oh-my-herdr] ⚠ worker \`${w.name}\`${w.task ? ` (task ${w.task})` : ''} is **${phase}**.`,

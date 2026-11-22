@@ -74,7 +74,7 @@ const RESULT = `${TASK_DIR}/result.md`
 function seedRunningScout(mem: Mem, agentId: string) {
   mem.set(
     '/work/.omh/agents/scout-auth.json',
-    JSON.stringify({ name: 'scout-auth', category: 'explore', profile: 'sub-explore', family: 'claude', agent: 'subagent', pane: `agent:${agentId}`, cwd: '/work', run: '_scout', task: 'scout-auth', task_dir: TASK_DIR }),
+    JSON.stringify({ name: 'scout-auth', category: 'explore', profile: 'sub-explore', family: 'claude', agent: 'subagent', pane: `agent:${agentId}`, cwd: '/work', run: '_scout', task: 'scout-auth', task_dir: TASK_DIR, lead: 'w1:p1' }),
   )
   mem.set(
     `${TASK_DIR}/dispatch.json`,
@@ -111,6 +111,11 @@ describe('dispatching to a subagent profile', () => {
     expect(spawned[0].model).toBe('haiku')
     expect(spawned[0].description).toBe('omh scout-auth')
     expect(spawned[0].prompt).toContain(`${TASK_DIR}/brief.md`)
+    expect(spawned[0].prompt).toContain(RESULT)
+    expect(spawned[0].prompt).toContain('final reply is your report')
+    expect(spawned[0].prompt).toContain('do not write that file yourself')
+    expect(spawned[0].prompt).toContain('read-only scout')
+    expect(spawned[0].prompt).not.toContain('Follow its reporting instructions')
     const brief = mem.get(`${TASK_DIR}/brief.md`)!
     expect(brief).toContain('Find where sessions are checked.')
     expect(brief).toContain('Your final reply is your report')
@@ -192,7 +197,7 @@ describe('file ownership with a subagent worker', () => {
       '/work/.omh/runs/r1/plan.json',
       JSON.stringify({ goal: 'g', waves: [{ id: 1, gate: 'tests pass', tasks: [{ id: 'T1', title: 'auth', intent: 'implement', category: 'quick', owns: ['src/auth.ts'], deps: [] }] }] }),
     )
-    mem.set('/work/.omh/agents/w1-t1.json', JSON.stringify({ name: 'w1-t1', category: 'quick', profile: 'sub-haiku', family: 'claude', agent: 'subagent', pane: 'agent:ag7', cwd: '/work', run: 'r1', task: 'T1', task_dir: dir }))
+    mem.set('/work/.omh/agents/w1-t1.json', JSON.stringify({ name: 'w1-t1', category: 'quick', profile: 'sub-haiku', family: 'claude', agent: 'subagent', pane: 'agent:ag7', cwd: '/work', run: 'r1', task: 'T1', task_dir: dir, lead: 'w1:p1' }))
     mem.set(`${dir}/dispatch.json`, JSON.stringify({ task: 'T1', worker: 'w1-t1', profile: 'sub-haiku', family: 'claude', model: 'general-purpose haiku', intent: 'implement', category: 'quick', rationale: 'r', override: false, warnings: [], dispatchedAt: 0, retries: 0, outcome: null, diagnose: null }))
     on('agent.list', () => ({ value: [{ id: 'ag7', description: 'omh T1', type: 'general-purpose', status: 'running' }] }))
     on('tool.call', (_$: any, e: any) => ({ result: `edited by ${e.agentId ?? 'lead'}` }))

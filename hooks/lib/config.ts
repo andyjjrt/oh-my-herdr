@@ -23,6 +23,12 @@ export type AgentSpec = {
   bin: string
   stall_seconds?: number
   diagnose?: DiagnoseRules
+  /** Backends the agent can report status on; absent: not declared, assumed able. */
+  reports?: Array<'herdr' | 'hc'>
+  /** Per backend, the oldest version that reports status there. */
+  min_version?: Partial<Record<'herdr' | 'hc', string>>
+  /** Command whose output holds the agent's version. */
+  version_cmd?: string[]
 }
 
 export type Category = { profiles: string[]; preamble: string | null }
@@ -93,7 +99,17 @@ export function normalizeAgent(name: string, raw: unknown): AgentSpec {
     bin: typeof r.bin === 'string' ? r.bin : (command[0] ?? kind ?? name),
     ...(typeof r.stall_seconds === 'number' && { stall_seconds: r.stall_seconds }),
     ...(r.diagnose !== undefined && { diagnose: asRecord(r.diagnose) as DiagnoseRules }),
+    ...(Array.isArray(r.reports) && { reports: r.reports.filter((b): b is 'herdr' | 'hc' => b === 'herdr' || b === 'hc') }),
+    ...(minVersions(r.min_version) !== undefined && { min_version: minVersions(r.min_version)! }),
+    ...(asStrings(r.version_cmd).length > 0 && { version_cmd: asStrings(r.version_cmd) }),
   }
+}
+
+function minVersions(raw: unknown): AgentSpec['min_version'] | undefined {
+  const r = asRecord(raw)
+  const out: NonNullable<AgentSpec['min_version']> = {}
+  for (const b of ['herdr', 'hc'] as const) if (typeof r[b] === 'string' && r[b] !== '') out[b] = r[b] as string
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 /** `"name": "<command>"` is short for `{ "command": "<command>" }`. */
@@ -222,6 +238,53 @@ export function configProblems(cfg: Config): string[] {
   const known = new Set(['claude', 'opencode-go', ...Object.keys(cfg.quota.providers).filter(n => cfg.quota.providers[n]!.command !== undefined)])
   for (const [name, p] of Object.entries(cfg.profiles)) {
     if (typeof p.quota === 'string' && !known.has(p.quota)) out.push(`profile '${name}' bills quota '${p.quota}', which is neither built in nor given a "command" under quota.providers`)
+  }
+  for (const [name, a] of Object.entries(cfg.agents)) {
+    const raw = a as { reports?: unknown[] }
+    if (raw.reports !== undefined && raw.reports.length === 0) out.push(`agent '${name}' has an empty "reports" list`)
+    for (const [b, v] of Object.entries(a.min_version ?? {})) {
+      if (versionParts(v).length === 0) out.push(`agent '${name}' has min_version.${b} '${v}', which is not a version`)
+      else if (a.reports && !a.reports.includes(b as 'herdr' | 'hc')) out.push(`agent '${name}' has min_version.${b} but does not list '${b}' in "reports"`)
+    }
+  }
+  return out
+}
+
+/** The numeric parts of a version: `2026.11.21-2` → [2026, 11, 21, 2]. */
+function versionParts(v: string): number[] {
+  return (v.match(/\d+/g) ?? []).map(Number)
+}
+
+/** Negative when a is older than b, by numeric parts (missing parts count as 0). */
+export function compareVersions(a: string, b: string): number {
+  const x = versionParts(a)
+  const y = versionParts(b)
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return 0
+}
+
+/**
+ * Warnings for each agent a profile uses that can't report status on `backend`, or whose version
+ * (from `versions`, null: unknown) is older than its `min_version` there. Pure.
+ */
+export function statusReportProblems(cfg: Config, backend: 'herdr' | 'hc', versions: Record<string, string | null>): string[] {
+  const out: string[] = []
+  const agents = [...new Set(Object.values(cfg.profiles).map(p => p.agent))]
+  for (const name of agents) {
+    const a = cfg.agents[name]
+    if (!a) continue
+    if (a.reports && !a.reports.includes(backend)) {
+      out.push(`agent '${name}' cannot report status on the ${backend} backend (it reports on: ${a.reports.join(', ') || 'none'})`)
+      continue
+    }
+    const min = a.min_version?.[backend]
+    const have = versions[name]
+    if (min !== undefined && typeof have === 'string' && compareVersions(have, min) < 0) {
+      out.push(`agent '${name}' ${have} is older than ${min}, the first version that reports status on the ${backend} backend; workers will time out at startup`)
+    }
   }
   return out
 }

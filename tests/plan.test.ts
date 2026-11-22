@@ -4,6 +4,10 @@
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 
+import { approvePlan, listRuns, writePlan } from '../hooks/lib/actions'
+import { Paths, runWorkerName } from '../hooks/lib/files'
+import { rt } from '../hooks/lib/runtime'
+
 const AGENTS = { claude: { launch: 'herdr-kind', kind: 'claude' } }
 const CONFIG = {
   profiles: { 'claude-sonnet': { agent: 'claude', family: 'claude', args: [] } },
@@ -12,7 +16,7 @@ const CONFIG = {
 
 type Mem = Map<string, string>
 
-function disk(on: any, mem: Mem) {
+function disk(on: any, mem: Mem, run?: (argv: string[]) => { value: unknown } | undefined) {
   const ASSET = /\/skills\/oh-my-herdr\/assets\/(agents|config\.default)\.json$/
   const asset = (p: string) => {
     const m = ASSET.exec(p)?.[1]
@@ -40,6 +44,8 @@ function disk(on: any, mem: Mem) {
     return { value: [...names].map(name => ({ name, kind: mem.has(dir + name) ? 'file' : 'dir', size: 0 })) }
   })
   on('process.run', (_$: any, e: any) => {
+    const custom = run?.([...e.argv])
+    if (custom !== undefined) return custom
     if (e.argv[0] === 'rm') mem.delete(e.argv[e.argv.length - 1])
     return { value: { exitCode: e.argv[0] === 'rm' ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -86,6 +92,7 @@ function seedOldRun(mem: Mem) {
   mem.set(`${OLD}/plan.md`, '# Helm values\n')
   mem.set(`${OLD}/plan.json`, JSON.stringify({ goal: 'Helm', waves: [{ id: 1, gate: 'g', tasks: [{ id: 'T1', title: 'helm', intent: 'implement', category: 'deep', owns: [], deps: [] }] }] }))
   mem.set(`${OLD}/T1/dispatch.json`, '{}')
+  mem.set(`${OLD}/finished.json`, '{}') // an open legacy run would be adopted by the unbound lead (it would then hold current-run)
 }
 
 describe('planning a run', () => {
@@ -113,7 +120,8 @@ describe('planning a run', () => {
     // The old run is untouched.
     expect(mem.get(`${OLD}/plan.md`)).toBe('# Helm values\n')
     expect(JSON.parse(mem.get(`${OLD}/plan.json`)!).goal).toBe('Helm')
-    expect(JSON.parse(mem.get('/work/.omh/status.json')!).stage).toBe('running')
+    // The session is bound to the run now: its own progress is in the run's status file.
+    expect(JSON.parse(mem.get(`${NEW}/status.json`)!).stage).toBe('running')
   })
 
   test('a rejected plan keeps the approval: fixed, it saves', async ($, on) => {
@@ -167,5 +175,159 @@ describe('planning a run', () => {
     expect(await status($, { action: 'plan', plan: PLAN('deep') })).toContain('changed after it was approved')
     expect(await approve($)).toContain('approved')
     expect(await status($, { action: 'plan', plan: PLAN('deep') })).toContain('plan saved')
+  })
+})
+
+// ------------------------------------------------------------------ several runs at once
+
+describe('several runs', () => {
+  const cell = <T,>(init: T) => {
+    let v = init
+    return { get: async () => v, set: async (fn: (old: T) => T) => (v = fn(v)) }
+  }
+
+  /** A session facade over an in-memory disk: what approvePlan, listRuns and the run view touch. */
+  function fakeHost(mem: Mem) {
+    const dirOf = (p: string) => [...mem.keys()].some(k => k.startsWith(`${p.replace(/\/$/, '')}/`))
+    return {
+      fs: {
+        read: async (path: string) => {
+          const t = mem.get(path)
+          if (t === undefined) throw new Error(`ENOENT ${path}`)
+          return t
+        },
+        write: async (path: string, text: string) => void mem.set(path, text),
+        exists: async (path: string) => mem.has(path) || dirOf(path),
+        stat: async (path: string) => ({ kind: mem.has(path) ? 'file' : 'dir', size: mem.get(path)?.length ?? 0 }),
+        list: async (path: string) => {
+          const dir = `${path.replace(/\/$/, '')}/`
+          const names = new Set([...mem.keys()].filter(k => k.startsWith(dir)).map(k => k.slice(dir.length).split('/')[0]!))
+          return [...names].map(name => ({ name, kind: mem.has(dir + name) ? 'file' : 'dir', size: 0 }))
+        },
+      },
+      process: { run: async (argv: string[]) => (argv[0] === 'rm' ? (mem.delete(argv[argv.length - 1]!), { exitCode: 0, stdout: '', stderr: '' }) : { exitCode: 1, stdout: '', stderr: '' }) },
+      clock: { now: async () => Date.UTC(2026, 10, 21), after: () => ({ cancel() {} }), every: () => ({ cancel() {} }) },
+      state: { run: cell<unknown>(null), workers: cell<Record<string, unknown>>({}), bound: cell<unknown>(null) },
+    }
+  }
+
+  const A = '20261121-alpha'
+  const B = '20261121-beta'
+  const ROOT = '/main/.omh'
+
+  async function session(mem: Mem, bound: string | null = null) {
+    const saved = { $: rt.$, paths: rt.paths, cfg: rt.cfg }
+    rt.$ = fakeHost(mem) as never
+    rt.cfg = null
+    rt.paths = new Paths(bound === null ? '/main' : '/wt/b', ROOT, bound)
+    return () => Object.assign(rt, saved)
+  }
+
+  const seed = (mem: Mem) => {
+    mem.set(`${ROOT}/current-run`, `${A}\n`)
+    mem.set(`${ROOT}/runs/${A}/draft.md`, '# Alpha work\n\nT1\n')
+    mem.set(`${ROOT}/runs/${B}/draft.md`, '# Beta work\n\nT1\n')
+  }
+
+  test('two drafts coexist; approving b by id leaves a a draft', async () => {
+    const mem: Mem = new Map()
+    seed(mem)
+    const restore = await session(mem)
+    try {
+      const r = await approvePlan('beta')
+      expect(r).toMatchObject({ ok: true, run: B, file: `${ROOT}/runs/${B}/plan.md` })
+      expect(mem.get(`${ROOT}/runs/${B}/plan.md`)).toContain('# Beta work')
+      expect(mem.has(`${ROOT}/runs/${B}/draft.md`)).toBe(false)
+      expect(mem.has(`${ROOT}/runs/${B}/plan.approved`)).toBe(true)
+      // a is untouched, still a draft, still current
+      expect(mem.get(`${ROOT}/runs/${A}/draft.md`)).toContain('# Alpha work')
+      expect(mem.has(`${ROOT}/runs/${A}/plan.md`)).toBe(false)
+      expect(mem.get(`${ROOT}/current-run`)).toBe(`${A}\n`)
+    } finally {
+      restore()
+    }
+  })
+
+  test('approve with no id approves this session\'s run; an unknown id lists the drafts', async () => {
+    const mem: Mem = new Map()
+    seed(mem)
+    const restore = await session(mem)
+    try {
+      const bad = await approvePlan('gamma')
+      expect(bad.ok).toBe(false)
+      expect(bad.text).toContain(A)
+      expect(bad.text).toContain(B)
+      const r = await approvePlan()
+      expect(r).toMatchObject({ ok: true, run: A })
+      expect(mem.get(`${ROOT}/runs/${A}/plan.md`)).toContain('# Alpha work')
+      expect(mem.get(`${ROOT}/runs/${B}/draft.md`)).toContain('# Beta work')
+    } finally {
+      restore()
+    }
+  })
+
+  test('listRuns shows both runs, their states, goals and whose they are', async () => {
+    const mem: Mem = new Map()
+    seed(mem)
+    const plan = { goal: 'g', waves: [{ id: 1, gate: 'g', tasks: [{ id: 'T1', title: 't', intent: 'implement', category: 'deep', owns: [], deps: [] }] }] }
+    const C = '20261120-gamma'
+    mem.set(`${ROOT}/runs/${C}/plan.md`, '# Gamma work\n')
+    mem.set(`${ROOT}/runs/${C}/plan.json`, JSON.stringify(plan))
+    mem.set(`${ROOT}/runs/${C}/gates.json`, JSON.stringify({ passed: [1] }))
+    const D = '20261119-delta'
+    mem.set(`${ROOT}/runs/${D}/plan.md`, '# Delta work\n')
+    mem.set(`${ROOT}/runs/${D}/plan.json`, JSON.stringify(plan))
+    mem.set(`${ROOT}/runs/${D}/closed.json`, '{}')
+    mem.set(`${ROOT}/runs/_scout/x/brief.md`, 'scout')
+    const restore = await session(mem)
+    try {
+      await approvePlan(B)
+      const t = (await listRuns()).text
+      const row = (id: string) => t.split('\n').find(l => l.includes(id))!
+      expect(row(A)).toContain('draft')
+      expect(row(A)).toContain('Alpha work')
+      expect(row(A)).toContain('this session')
+      expect(row(B)).toContain('approved')
+      expect(row(C)).toContain('finished')
+      expect(row(C)).toContain('1/1')
+      expect(row(D)).toContain('closed')
+      expect(t).not.toContain('_scout')
+    } finally {
+      restore()
+    }
+  })
+
+  test('a bound session names its workers with the run tag (unbound naming is covered by tests/hc.test.ts)', async ($, on) => {
+    const bound = new Map<string, string>()
+    const started: string[] = []
+    disk(on, bound, argv => {
+      const reply = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+      if (argv[0] === 'hc' && argv[1] === 'run') {
+        started.push(argv[argv.indexOf('--name') + 1]!)
+        return reply('{"address":"t9"}')
+      }
+      if (argv[0] === 'sh') return reply('idle\n')
+      if (argv[0] === 'hc' && argv[1] === 'send') return reply('{"started":true}')
+      return undefined
+    })
+    ;(on as any)('process.spawn', async function* () {
+      yield { stream: 'stdout', text: `${JSON.stringify({ name: 'w', status: 'idle', ts: 1 })}\n` }
+      await new Promise(() => undefined)
+      return { code: 0, signal: null }
+    })
+    mock.env(on, { HOME: '/home/u', HC_TERMINAL_ID: 't1', OMH_RUN: 'b' })
+    const clock = mock.clock(on)
+    on('tool.register', (_$: any, e: any) => ({ value: { tool: `mcp__oh-my-herdr__${e.name}` } }))
+    on('command.register', (_$: any, e: any) => ({ value: { command: e.name } }))
+    on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await clock.settle()
+    const r = String(((await $.tool.call({ tool: 'mcp__oh-my-herdr__omh_dispatch', task: 'scout-auth', intent: 'explore', rationale: 'look-up', brief: 'Find it.', category: 'deep' } as never)) as any).result)
+    expect(r).not.toContain('ERROR')
+    const tagged = runWorkerName('b', 'scout-auth')
+    expect(tagged).not.toBe('scout-auth')
+    expect(bound.has(`/work/.omh/agents/${tagged}.json`)).toBe(true)
+    expect(bound.has('/work/.omh/agents/scout-auth.json')).toBe(false)
+    expect(started.some(n => n.endsWith(tagged))).toBe(true)
   })
 })

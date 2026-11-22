@@ -81,20 +81,23 @@ describe('without prismantis', () => {
 
 describe('/omh plan pane', () => {
   const PLAN = '# Ship it\n\n| Task | Owns |\n|---|---|\n| T1 | a.ts |\n'
-  /** A disk holding only a pre-0.4 draft, .omh/plan.md (the preview falls back to it). */
+  const RUN = '/work/.omh/runs/20261121-x'
+  /** A disk holding one run with a draft: current-run names it and the preview shows its draft.md. */
   function disk(on: any) {
     on('fs.stat', (_$: any, e: any) => {
-      if (e.path === '/work/.omh/plan.md') return { value: { kind: 'file', size: PLAN.length } }
+      if (e.path === `${RUN}/draft.md`) return { value: { kind: 'file', size: PLAN.length } }
       throw new Error('ENOENT')
     })
+    on('fs.exists', (_$: any, e: any) => ({ value: e.path === RUN }))
     on('fs.read', (_$: any, e: any) => {
-      if (e.path === '/work/.omh/plan.md') return { value: PLAN }
+      if (e.path === '/work/.omh/current-run') return { value: '20261121-x\n' }
+      if (e.path === `${RUN}/draft.md`) return { value: PLAN }
       throw new Error('ENOENT')
     })
   }
   const PANE = { plugin: 'oh-my-herdr', surface: 'terminal', component: 'Pane', requestId: 'omh-plan', props: { title: 'plan.md', isFocused: false, bodyColumns: 60, placement: 'dock' } } as never
 
-  test('draws an old .omh/plan.md through prismantis under its path', async ($, on) => {
+  test('draws the run\'s draft through prismantis under its path', async ($, on) => {
     const seen: string[] = []
     prismantis(on, seen)
     disk(on)
@@ -102,18 +105,18 @@ describe('/omh plan pane', () => {
     await lead($, on)
     const ui = await $.ui.mount(PANE)
     const text = textOf(await ui.drawn())
-    expect(text).toContain('/work/.omh/plan.md')
+    expect(text).toContain(`${RUN}/draft.md`)
     expect(seen).toEqual([PLAN])
     await ui.unmount()
   })
 
-  test('without prismantis, plan.md shows as plain text in the same pane', async ($, on) => {
+  test('without prismantis, the draft shows as plain text in the same pane', async ($, on) => {
     disk(on)
     engine(on)
     await lead($, on)
     const ui = await $.ui.mount(PANE)
     const text = textOf(await ui.drawn())
-    expect(text).toContain('/work/.omh/plan.md')
+    expect(text).toContain(`${RUN}/draft.md`)
     expect(text).toContain('# Ship it')
     await ui.unmount()
   })

@@ -235,7 +235,7 @@ describe('hc: through the mod', () => {
 
   test('a free hc worker that last reported done is reused: the brief goes by hc send, no new terminal', async ($, on) => {
     const mem: Mem = new Map([
-      ['/work/.omh/agents/old.json', JSON.stringify({ name: 'old', category: 'explore', profile: 'claude-sonnet', family: 'claude', agent: 'claude', pane: 'hc:t5', cwd: '/work', run: null, task: null, task_dir: null })],
+      ['/work/.omh/agents/old.json', JSON.stringify({ name: 'old', category: 'explore', profile: 'claude-sonnet', family: 'claude', agent: 'claude', pane: 'hc:t5', cwd: '/work', run: null, task: null, task_dir: null, lead: 'hc:t1' })],
     ])
     disk(on, mem)
     const hc = hcMock(on, argv => {
@@ -249,12 +249,20 @@ describe('hc: through the mod', () => {
     const send = hc.runs.find(a => isHc(a, 'send'))!
     expect(send).toContain('t5')
     expect(send.at(-1)).toContain('/work/.omh/runs/_scout/scout-auth/brief.md')
+    // The prompt itself carries the handoff: brief, report path, one-line reply; a scout is read-only.
+    const prompt = send.at(-1)!
+    expect(prompt).toContain('/work/.omh/runs/_scout/scout-auth/result.md')
+    expect(prompt).toContain('DONE /work/.omh/runs/_scout/scout-auth/result.md')
+    expect(prompt).toContain('BLOCKED <one-sentence reason>')
+    expect(prompt).toContain('read-only scout')
+    expect(prompt).not.toContain('Follow its reporting instructions')
+    expect(prompt).not.toContain('\n')
     expect(hc.runs.some(a => isHc(a, 'run'))).toBe(false)
   })
 
   test('a `working` the watcher never repeats is not a stall: the pane is asked before alerting', async ($, on) => {
     const mem: Mem = new Map([
-      ['/work/.omh/agents/old.json', JSON.stringify({ name: 'old', category: 'explore', profile: 'claude-sonnet', family: 'claude', agent: 'claude', pane: 'hc:t5', cwd: '/work', run: null, task: null, task_dir: null })],
+      ['/work/.omh/agents/old.json', JSON.stringify({ name: 'old', category: 'explore', profile: 'claude-sonnet', family: 'claude', agent: 'claude', pane: 'hc:t5', cwd: '/work', run: null, task: null, task_dir: null, lead: 'hc:t1' })],
     ])
     disk(on, mem)
     // hc reports `working` once, right as the prompt is sent; the watcher (hcMock) only ever said idle.

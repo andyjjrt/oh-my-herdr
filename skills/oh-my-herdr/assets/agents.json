@@ -6,10 +6,14 @@
     "launch = \"command\":    runs <command> <args> in the pane with HERDR_AGENT=<detect_as>, waits until herdr detects the agent, then names it.",
     "                         Use this for forks/wrappers whose executable herdr doesn't know (e.g. senpi, a pi fork).",
     "launch = \"subagent\":   no pane: a Claude Code subagent of the lead ($.agent.spawn). The profile's \"model\" and",
-    "                         \"subagent_type\" pick it; its final reply is saved as result.md. Shares the lead's Claude quota."
+    "                         \"subagent_type\" pick it; its final reply is saved as result.md. Shares the lead's Claude quota.",
+    "Optional status-report metadata: \"reports\": [\"herdr\", \"hc\"] lists the backends the agent can report status on;",
+    "\"min_version\": {\"hc\": \"2026.11.21\"} the oldest version that reports on that backend; \"version_cmd\" prints its version.",
+    "senpi before 2026.11.21 never reports to hc (OSC 7501), so on the hc backend its workers would time out at startup."
   ],
-  "claude":   { "launch": "herdr-kind", "kind": "claude",   "bin": "claude" },
-  "pi":       { "launch": "herdr-kind", "kind": "pi",       "bin": "pi" },
-  "senpi":    { "launch": "command",    "command": ["senpi"], "detect_as": "pi", "bin": "senpi" },
+  "claude":   { "launch": "herdr-kind", "kind": "claude",   "bin": "claude", "reports": ["herdr", "hc"] },
+  "pi":       { "launch": "herdr-kind", "kind": "pi",       "bin": "pi", "reports": ["herdr", "hc"] },
+  "senpi":    { "launch": "command",    "command": ["senpi"], "detect_as": "pi", "bin": "senpi",
+                "reports": ["herdr", "hc"], "min_version": { "hc": "2026.11.21" }, "version_cmd": ["senpi", "--version"] },
   "subagent": { "launch": "subagent" }
 }

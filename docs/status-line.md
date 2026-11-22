@@ -28,6 +28,17 @@ this to Claude Code (then you may set `display` to `off`):
 `refreshInterval` matters: Claude Code otherwise reruns the status line only after each reply, so
 workers finishing while the lead is idle wouldn't show.
 
+## With several runs
+
+`.omh/status.json` is a summary: the top-level fields are the unbound session's run, and `runs`
+lists every active run. A bound lead writes its own `.omh/runs/<run>/status.json` instead.
+`statusline/omh-wave` picks its run by `runs/*/lead.json`: the newest not-closed run whose `root`
+equals the current git toplevel, in the main checkout or in a worktree you made, so each lead's
+line shows its own run. When none matches it falls back to the summary. A finished run's status
+file is removed, so it falls back to the summary too. Two leads in one checkout both show the most
+recent binding in that root. `omh-wave --runs [dir]` (and `--field runs`) always reads the summary, in any checkout, and prints
+one line per active run (`<id> <state> <done>/<total> <goal>`, needs `jq`). `OMH_DIR` is honoured.
+
 ## The API
 
 - `statusline/omh-wave [dir]` prints the ready line (`██░░░░ 2/5`, then `⚠1` while a task needs

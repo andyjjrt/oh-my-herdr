@@ -34,6 +34,11 @@ senpi                               # then in senpi:
                                     #   (or export OPENCODE_API_KEY=... in your shell rc)
 senpi --list-models opencode-go
 ```
+On the herdr-core (hc) backend you need **senpi ≥ 2026.11.21**: older versions never report their
+status (OSC 7501), so hc cannot tell when they are ready and workers time out at startup (diagnosis
+`no-status-report`). `/omh check` shows the installed version and warns when it is too old; routing
+then falls through to the next profile of the category.
+
 Credentials live in `~/.senpi/agent/auth.json` (`SENPI_CODING_AGENT_DIR` overrides the directory).
 
 **Unattended workers and permissions.** senpi has a permission system that prompts before tool
@@ -68,7 +73,7 @@ Shape:
   "agents": {},                       // optional overrides/additions to assets/agents.json
   "profiles": {
     "claude-sonnet": { "agent": "claude", "family": "claude",
-                       "args": ["--model", "sonnet", "--permission-mode", "acceptEdits"] },
+                       "args": ["--model", "sonnet", "--permission-mode", "auto"] },
     "go-deepseek":   { "agent": "senpi",  "family": "deepseek",
                        "args": ["--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--thinking", "max"] },
     "sub-explore":   { "agent": "subagent", "family": "claude", "subagent_type": "Explore", "model": "haiku" }
@@ -140,3 +145,11 @@ provider every profile maps to. `/omh quota` shows current usage.
 Run Claude Code in a herdr pane inside the project, then `/ulw <goal>`. Add `.omh/` to `.gitignore`.
 Every finished task is logged to `~/.local/state/oh-my-herdr/history.jsonl` (intent, category,
 profile, outcome, duration and the lead's one-line quality note).
+
+## Worktrees (optional)
+
+oh-my-herdr does not manage worktrees. To work a run in its own checkout, make one yourself, start
+Claude there and approve: `git worktree add ../repo.worktrees/x -b feat/x`, then
+`cd ../repo.worktrees/x && claude`, then `/omh approve <id>`. `/omh approve [<id>]` binds that session
+to the run wherever it runs. See docs/configuration.md.
+

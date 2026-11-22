@@ -1,5 +1,98 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Several runs at once.** Each draft with a new `name` is its own run and earlier drafts stay;
+  `/omh runs` lists them with their state, lead and root, and `/omh approve [<id>]` approves one by
+  id or suffix.
+- **`/omh approve [<id>]` binds this session to the run**, in whatever checkout it runs (the main
+  checkout or a worktree you made yourself). The session's dispatch, status and plan then follow
+  that run, not the shared `current-run`. oh-my-herdr does not create, remove or track git
+  worktrees; to work a run in its own checkout:
+
+  ```sh
+  git worktree add ../repo.worktrees/x -b feat/x
+  cd ../repo.worktrees/x && claude
+  /omh approve <id>
+  ```
+
+  `/omh approve <id>` on a run another live session leads is refused unless `force` (a takeover);
+  an unbound session never follows `current-run` into such a run. A run closed from another
+  session unbinds its lead with a wake-up. Two leads in one checkout are allowed; that is up to you. A bound session re-approves its own
+  run; `/omh approve <other>` is refused until its run is finished or closed. A bound session may
+  still draft a new `name`: the draft is written, the binding and `current-run` stay. Approving
+  writes `runs/<run>/lead.json` (`{ pane, root }`).
+- **`omh_status finish` and `/omh close [run] [force]` only record state** (`finished.json`,
+  `closed.json`); `close` tears down the run's workers and unbinds the session bound to it.
+  `close` without `force` refuses a run whose lead is live in another pane.
+- **`.omh/` is central**: found through `git rev-parse --git-common-dir`, so every worktree shares
+  the main checkout's (`OMH_DIR` still overrides). `OMH_RUN` binds a freshly started lead to a run.
+- **Plugin hook points.** `.omh/events.jsonl` logs the lifecycle (`draft`, `approved`, `bound`,
+  `unbound`, `wave_settled`, `alert`, `finished`, `closed`, `approval_rejected`). An approvals drop
+  file `.omh/approvals/<run>` with the draft digest approves a run from outside: the session bound
+  to that run claims it; a run nobody leads is approved without binding (a future inbox/Discord
+  plugin may then start its own worktree and lead and send `/omh approve <id>`). `.omh/status.json`
+  also lists every active run.
+- **Status capability routing.** Agents can declare `reports`, `min_version` and `version_cmd`;
+  routing skips profiles whose agent cannot report status on the backend, and `/omh check` says why.
+
+### Changed
+
+- **`statusline/omh-wave` finds its run by `lead.json`**: the newest not-closed run whose `root`
+  is the current git toplevel; otherwise it falls back to the summary. A finished run's status is
+  removed, so it then falls back too.
+- **Default profile permission modes.** `claude-sonnet` and `claude-review` in the default config
+  now start with `--permission-mode auto`. A project can set its
+  own `--permission-mode` per profile in its config.
+- **The approvals poll returns early** when no drop file can be claimed.
+- **Dispatch reuses only workers whose cwd is this checkout's root**, so a worker left in another
+  checkout is not given tasks. Teardown and reconcile still own it.
+
+### Fixed
+
+- **Worker ownership is recorded.** Worker files carry a `lead` field (the session's pane address,
+  `leadId()`); `ownsWorker` then matches on it alone, so a worker started in a subfolder (`cwd`) or
+  left over from an earlier run is still its lead's.
+  A lead restarted in a new pane has a new identity and no longer owns its old workers (it treats
+  them as foreign; `/omh teardown <name>` still reaches them).
+- **`omh_spawn` no longer overwrites another lead's live worker** of the same name; it refuses
+  while that pane exists. Dispatch's name picker skips names that have an agent file.
+- **Freed workers keep their file truthful.** Verifying, abandoning or collecting a task now also
+  rewrites the agent file (`run`, `task`, `task_dir`), so a lead that finished one run still owns,
+  reuses and tears down its idle workers in the next.
+- **`/omh close` tears down a bound lead's spawned workers** (spawn records the run), as well as
+  those it dispatched.
+- **Several leads no longer touch each other's workers.** Teardown (with no names), reconcile
+  after a reload and worker reuse in dispatch act only on this session's workers (`ownsWorker`).
+- **`OMH_RUN` seeds a session only once**: not after `/omh close` or an unbind, and not for a run
+  that has a `closed.json`. An unbound session skips a closed `current-run`.
+- **Scouts of a bound lead are tagged** (`runs/_scout/<tag>-<id>`), so two leads' scouts of the
+  same name no longer share a directory.
+- **A bound session writes its own `runs/<run>/status.json`**; only an unbound one writes the top
+  of `.omh/status.json`. Stale agent files (pane gone) no longer count against `max_concurrent`.
+- **`recheck` uses the task's current worker**, not an older one that once held it.
+- **Stale wake-ups are dropped**: an alert for a worker that was re-dispatched or torn down is not
+  sent, and a wave table is rebuilt from the live state.
+- **A new `no-status-report` diagnosis** for an agent that never reports status on hc, with a hint
+  to upgrade it (senpi needs ≥ 2026.11.21 on hc).
+
+- **The worker prompt spells out the handoff**: the brief path, the `result.md` to write and the
+  one-line `DONE <path>` / `BLOCKED <reason>` reply (a subagent's final reply is its report). Closed
+  runs leave `.omh/status.json`; `omh-wave --runs` reads the summary in a bound checkout and honours
+  `OMH_DIR`. Compatibility code for older versions is removed (the legacy `.omh/plan.md` draft,
+  workers without `lead`, the `worktree` config warning).
+
+### Known limits
+
+- Two leads in one checkout share its files and its status line (it shows the most recent binding
+  in that root). Nothing guards against it.
+- Without a lead identity (outside herdr/hc) no `lead` is recorded and `current-run` is shared.
+- Two unbound sessions still share `current-run` for drafts until one approves.
+- A bound session writes only `runs` into the top-level `.omh/status.json`, so that summary can be
+  stale; `omh-wave` reads the run's own file.
+
 ## 0.4.3 — 2026-11-21
 
 ### Added

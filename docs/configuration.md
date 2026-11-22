@@ -23,7 +23,7 @@ family for a review.
   "max_panes_per_tab": 4,     // see Worker tabs
   "profiles": {
     "claude-sonnet": { "agent": "claude", "family": "claude",
-                       "args": ["--model", "sonnet", "--permission-mode", "acceptEdits"] },
+                       "args": ["--model", "sonnet", "--permission-mode", "auto"] },
     "go-deepseek":   { "agent": "senpi", "family": "deepseek",
                        "args": ["--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--thinking", "max"] },
     "sub-explore":   { "agent": "subagent", "family": "claude", "subagent_type": "Explore", "model": "haiku" }
@@ -149,6 +149,30 @@ splits of the last pane, right and down in turn. The next worker opens `omh-work
 A pane freed by `/omh teardown` is used again. (With hc, see
 [Where workers run](#where-workers-run-herdr-or-herdr-core).)
 
+## Worktrees
+
+oh-my-herdr does not create or manage git worktrees. Make the
+worktree yourself, start Claude in it, and approve the run there:
+
+```sh
+git worktree add ../repo.worktrees/x -b feat/x
+cd ../repo.worktrees/x && claude
+/omh approve <id>
+```
+
+`/omh approve [<id>]` binds that session to the run in whatever checkout it runs; the run's
+`lead.json` records `{ pane, root }`, and `/omh runs` shows the lead and root. Two leads in one
+checkout are allowed; that is your responsibility. `omh_status finish` and `/omh close [run] [force]`
+only record state (`close` needs `force` for an unfinished run) and never touch git or the worktree.
+
+### Environment
+
+| Variable | Meaning |
+| --- | --- |
+| `OMH_DIR` | The `.omh/` directory. Default: the main checkout's, found through `git rev-parse --git-common-dir` (so a linked worktree shares it) |
+| `OMH_RUN` | Binds a freshly started lead to that run (the checkout it starts in is its root). Used only when the session was never bound and `runs/<run>/closed.json` does not exist; closing or unbinding is not undone by a reload |
+| `OMH_ROLE` | `worker` makes the mod dormant (set for every worker the mod starts); a new lead starts without it |
+
 ## Agents (launch definitions)
 
 ```jsonc
@@ -165,6 +189,18 @@ A pane freed by `/omh teardown` is used again. (With hc, see
 | `herdr-kind` | `herdr agent start <name> --kind <kind> --pane <pane> -- <args>` |
 | `command` | running `<command> <args>` in the pane with `HERDR_AGENT=<detect_as>`, then naming the agent herdr detects. For forks and wrappers herdr doesn't know |
 | `subagent` | `$.agent.spawn` in the lead's session: no pane |
+
+`reports`, `min_version` and `version_cmd` say whether an agent can report its status to the backend:
+
+```jsonc
+"senpi": { "launch": "command", "command": ["senpi"], "reports": ["herdr", "hc"],
+           "min_version": { "hc": "2026.11.21" }, "version_cmd": ["senpi", "--version"] }
+```
+
+`reports` lists the backends it reports on (absent: assumed able); `min_version` is the oldest
+version that reports on a backend; `version_cmd` prints the version. Routing skips the profiles of
+an agent that cannot report on the backend in use and falls through to the next in the category;
+`/omh check` lists the mismatches.
 
 `stall_seconds` (default 30) is how long a worker may take to start working after a dispatch.
 `diagnose` adds screen patterns (regular expressions) per verdict to the built-in ones.

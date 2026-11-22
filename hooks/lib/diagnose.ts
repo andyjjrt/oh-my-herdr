@@ -49,6 +49,7 @@ const HINTS: Record<OmhVerdict, string> = {
   'config-error': 'The agent or model is misconfigured (login, model id, API key). Tell the user what to fix; re-dispatching will fail the same way.',
   crashed: 'The agent crashed. Read the pane, then spawn a fresh worker for the task.',
   interrupted: 'The agent was interrupted (by the user or a keypress). Ask before re-dispatching.',
+  'no-status-report': 'The agent started but never reported a status to hc (OSC 7501), so the mod cannot tell when it is ready. Its version is probably too old to report there: upgrade it (see `statusReportProblems` in /omh check, and the agent\'s "min_version" in agents.json), or route this category to another profile.',
   unknown: 'Nothing recognisable on screen. Read the excerpt and decide; add a rule to agents.json "diagnose" if this repeats.',
 }
 
@@ -58,6 +59,8 @@ export type DiagnoseInput = {
   screen: string
   hasResult: boolean
   quotaExhausted: string | null // the reason, when the worker's provider is over its threshold
+  /** Startup timed out with the agent never having reported a status on hc. */
+  neverReported?: boolean
   rules?: DiagnoseRules
   at: number
 }
@@ -100,6 +103,7 @@ export function diagnose(input: DiagnoseInput): OmhDiagnosis {
     }
   }
   if (input.quotaExhausted !== null) return done('quota-exhausted', input.quotaExhausted)
+  if (input.neverReported === true) return done('no-status-report', 'the agent never reported a status on hc (OSC 7501) while starting')
   // A subagent's "screen" is its status and answer (a BLOCKED reason, say): show it rather than guess.
   if (input.phase === 'gone' && input.agent !== 'subagent') return done('crashed', 'the pane closed or the agent exited before writing result.md')
   return done('unknown', excerpt(input.screen, 8).slice(-600))

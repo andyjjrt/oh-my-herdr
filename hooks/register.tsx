@@ -4,19 +4,20 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { approvePlan, check, closeTask, collect, dispatch, draftPlan, passGate, planFile, quotaReport, recheckTask, spawn, status, teardown, writePlan, type Answer } from './lib/actions'
+import { approveRun, check, closeRun, closeTask, collect, dispatch, draftPlan, finishRun, listRuns, passGate, planFile, pollApprovals, quotaReport, recheckTask, spawn, status, teardown, writePlan, type Answer } from './lib/actions'
 import { BOARD_ID, boardView } from './lib/board'
 import { bind, readEnv } from './lib/engine'
 import { Paths } from './lib/files'
 import { ownerOf, relativeTo } from './lib/guards'
 import { agentCallRule, kindText, routedSubagents } from './lib/config'
-import { loadPlan, config, flushWake, onSubagentEnd, optionsOf, reconcile, refreshQuota, refreshRun, rt, workers } from './lib/runtime'
+import { loadPlan, bindHost, dropLostBinding, otherLiveLead, writeLeadFile, config, flushWake, onSubagentEnd, optionsOf, reconcile, refreshQuota, refreshRun, rt, workers } from './lib/runtime'
 import { subagentIdOf } from './lib/subagent'
 import { ACTIVE } from './lib/settle'
 import { statusText, ulwPrompt } from './lib/text'
 import { progressPanel, statusTail } from './lib/statusbar'
 import { compactCall, compactResult, OMH_TOOL, resultText } from './lib/toolrow'
 import { drawMarkdown, looksLikeMarkdown, splitCollected } from './lib/prismantis'
+import type { OmhBoundRun } from '../types'
 
 // The same refs as hooks/lib/engine.ts: a read must name a const of its own file, and a read made
 // while drawing subscribes the drawing to the value.
@@ -60,12 +61,13 @@ const TOOLS = [
       'The run\'s plan and progress. action "show": waves, tasks, workers. "draft": write the plan in prose (goal, findings with file:line, approach, tasks with acceptance checks, risks, open questions) as the run\'s draft.md; give "name" to start a run for new work (.omh/runs/<date>-<name>/), leave it out to revise the current run\'s plan. Then summarise it for the user and end your turn — /omh approve makes it the run\'s plan.md.',
       '"plan": only after plan.md is approved, save the current run\'s plan.json derived from it (goal; waves with id, gate and tasks; each task id, title, intent, category, owns[], deps[]); tasks in one wave must not own the same files, and category is a routing name from the config, not the intent. A rejected plan can be fixed and sent again; a different plan.md needs a new draft and approval.',
       '"verified" / "abandon": close a task with a one-line `quality` note on how good the result was ("abandon" also closes a scout that brought nothing back). "gate": mark a wave\'s gate passed once all its tasks are closed; the next wave cannot be dispatched before that.',
+      '"finish": after the last gate has passed, record the run as finished; the user then closes it with /omh close (nothing is merged or removed).',
       '"recheck": re-read the live status of the worker holding `task` and correct its phase, when an alert (stalled, idle without result) looks wrong because the worker is in fact working or has reported.',
     ].join(' '),
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['show', 'draft', 'plan', 'verified', 'abandon', 'gate', 'recheck'] },
+        action: { type: 'string', enum: ['show', 'draft', 'plan', 'verified', 'abandon', 'gate', 'recheck', 'finish'] },
         markdown: { type: 'string', description: 'For "draft": the whole plan, as markdown' },
         name: { type: 'string', description: 'For "draft": a short slug naming new work, which starts a new run (.omh/runs/<date>-<name>/). Leave it out to revise the current run\'s plan.' },
         plan: { type: 'object', description: 'For "plan": { goal, waves: [{ id, gate, tasks: [{ id, title, intent, category, owns, deps }] }] }' },
@@ -132,6 +134,8 @@ async function serve(name: string, a: Args): Promise<Answer> {
           return closeTask(s(a.task) ?? '', s(a.quality) ?? '', 'abandoned')
         case 'recheck':
           return recheckTask(s(a.task) ?? '')
+        case 'finish':
+          return finishRun()
         case 'gate':
           return typeof a.wave === 'number' ? passGate(a.wave, s(a.note)) : { ok: false, text: 'gate needs "wave"' }
         default:
@@ -167,14 +171,53 @@ async function boot($: EngineInterface, cwd: string): Promise<boolean> {
     rt.$ = null
     return false
   }
-  rt.$ = bind($, env)
-  const root = (await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd }).catch(() => null))?.stdout.trim() || cwd
-  rt.paths = new Paths(root, env.OMH_DIR || `${root}/.omh`)
+  rt.$ = bindHost(bind($, env), $)
+  const git = async (args: string[], at: string): Promise<string> => {
+    const r = await $.process.run(['git', ...args], { cwd: at }).catch(() => null)
+    return r !== null && r.exitCode === 0 ? r.stdout.trim() : ''
+  }
+  const toplevel = await git(['rev-parse', '--show-toplevel'], cwd)
+  const root = toplevel || cwd
+  // The common dir of a linked worktree is <main>/.git: its parent is the main checkout, where the
+  // central .omh lives. In a bare repository or outside git, this checkout stands in for it.
+  const common = (await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], root)).replace(/\/+$/, '')
+  const main = common.endsWith('/.git') ? common.slice(0, -'/.git'.length) : root
+  // .omh is central (the main checkout's) unless OMH_DIR names another; root stays this checkout's.
+  const omh = env.OMH_DIR || `${main}/.omh`
+  // A lead started with OMH_RUN is that run's lead; a reload keeps a binding made by /omh approve.
+  // The stored state is OmhBoundRun | { run: null } | null: { run: null } means "explicitly unbound"
+  // (set by unbindRun), which OMH_RUN must not override on a hot reload; null means never set.
+  // A stored run that was closed meanwhile (from another session) is not this session's run any more.
+  type Stored = OmhBoundRun | { run: null } | null
+  const stored = (await rt.$.state.bound.get()) as unknown as Stored | undefined
+  const fromEnv = (await $.env.get('OMH_RUN'))?.trim() || null
+  const seeded = stored == null && fromEnv !== null && !(await $.fs.exists(`${omh}/runs/${fromEnv}/closed.json`)) ? fromEnv : null
+  const keptRun = stored != null && stored.run !== null && !(await $.fs.exists(`${omh}/runs/${stored.run}/closed.json`)) ? stored.run : null
+  const bound: OmhBoundRun | null = seeded !== null ? { run: seeded, root } : keptRun !== null ? { run: keptRun, root } : null
+  rt.paths = new Paths(root, omh, bound?.run ?? null)
+  if (seeded !== null) await rt.$.state.bound.set(() => ({ run: seeded, root }))
+  else if (stored != null && stored.run !== null && keptRun === null) await rt.$.state.bound.set(() => ({ run: null }))
   rt.watchPy = `${$.plugin.root}/skills/oh-my-herdr/scripts/omh-watch.py`
   rt.selfPane = env.HERDR_PANE_ID ?? null
   rt.selfTerminal = env.HC_TERMINAL_ID ?? null
+  // A binding kept over a reload (or seeded) is written to lead.json again: the pane or root may be new. One another live session
+  // took over meanwhile (/omh approve <run> force) is dropped instead.
+  const own = seeded ?? keptRun
+  if (own !== null) {
+    if (keptRun !== null && seeded === null && (await otherLiveLead(keptRun)) !== null) {
+      rt.paths = new Paths(root, omh)
+      await rt.$.state.bound.set(() => ({ run: null }))
+    } else await writeLeadFile(own, root)
+  }
   await config().catch(() => undefined)
   return true
+}
+
+/** Submitting from inside a command's own dispatch is refused: do it once that is done. */
+function wakeLead($: EngineInterface, text: string): void {
+  $.clock.after(0, () => {
+    $.prompt.submit({ text, asUser: true }).catch(err => $.ui.toast(`oh-my-herdr: could not wake the lead: ${(err as Error).message}`))
+  })
 }
 
 export const register: Register = (on, options) => {
@@ -186,7 +229,7 @@ export const register: Register = (on, options) => {
     await Promise.all([
       ...TOOLS.map(t => $.tool.register({ name: t.name, description: t.description, inputSchema: t.inputSchema as unknown as Record<string, unknown>, isDeferred: false }).catch(() => undefined)),
       $.command.register({ name: 'ulw', description: 'oh-my-herdr: ultrawork — plan, fan out to worker agents, verify', argumentHint: '<goal>' }).catch(() => undefined),
-      $.command.register({ name: 'omh', description: 'oh-my-herdr: status | plan | approve | quota | check | board | teardown', argumentHint: 'status [full]|plan|approve|quota|check|board|teardown', immediate: true }).catch(() => undefined),
+      $.command.register({ name: 'omh', description: 'oh-my-herdr: status | plan | approve | runs | close | quota | check | board | teardown', argumentHint: 'status [full]|plan|approve [run] [force]|runs|close [run] [force]|quota|check|board|teardown', immediate: true }).catch(() => undefined),
     ])
     // Reattaching watchers reads herdr and the disk: keep it out of the session's start.
     $.clock.after(0, () => {
@@ -196,6 +239,16 @@ export const register: Register = (on, options) => {
         await flushWake()
         await refreshQuota()
       })().catch(err => $.ui.log(`oh-my-herdr: start failed: ${(err as Error).message}`, { to: 'debug' }))
+    })
+    // Approvals dropped as files in .omh/approvals: this session's own run is re-approved; a run nobody leads is approved, unbound.
+    $.clock.every(7_000, () => {
+      void (async () => {
+        await dropLostBinding() // a run closed or taken over from another session
+        for (const d of await pollApprovals()) {
+          $.ui.log(`oh-my-herdr: ${d.text}`)
+          if (d.wake !== undefined) wakeLead($, d.wake)
+        }
+      })().catch(() => undefined)
     })
     $.clock.every(120_000, () => {
       void (async () => {
@@ -251,16 +304,19 @@ export const register: Register = (on, options) => {
       case 'teardown':
         return { text: (await teardown(undefined)).text }
       case 'approve': {
-        const answer = await approvePlan()
+        const words = e.args.trim().split(/\s+/).slice(1)
+        const force = words.includes('force') || words.includes('--force')
+        const answer = await approveRun(words.find(w => w !== 'force' && w !== '--force'), force)
         // The lead ended its turn to wait for this: wake it to split the plan into waves.
-        if (answer.ok) {
-          $.clock.after(0, () => {
-            $.prompt
-              .submit({ text: `plan.md approved (/omh approve). Derive the waves from ${answer.file ?? "the current run's plan.md"} with omh_status action "plan", then dispatch the first wave.`, asUser: true })
-              .catch(err => $.ui.toast(`oh-my-herdr: could not wake the lead: ${(err as Error).message}`))
-          })
-        }
+        if (answer.ok && answer.wake !== undefined) wakeLead($, answer.wake)
         return { text: answer.text }
+      }
+      case 'runs':
+        return { text: (await listRuns()).text }
+      case 'close': {
+        const words = e.args.trim().split(/\s+/).slice(1)
+        const force = words.includes('force') || words.includes('--force')
+        return { text: (await closeRun(words.find(w => w !== 'force' && w !== '--force'), force)).text }
       }
       case 'plan': {
         if ((await $.ui.panes()).some((p: { id: string }) => p.id === PLAN_ID)) {
@@ -284,7 +340,7 @@ export const register: Register = (on, options) => {
         return { text: r.isPlaced ? 'board opened' : `board will show when there is room${'reason' in r && r.reason ? ` (${r.reason})` : ''}` }
       }
       default:
-        return { text: 'usage: /omh status [full] | plan | approve | quota | check | board | teardown' }
+        return { text: 'usage: /omh status [full] | plan | approve [run] [force] | runs | close [run] [force] | quota | check | board | teardown' }
     }
   }).catch(() => ({ text: 'oh-my-herdr: the command failed; see the debug log' }))
 
