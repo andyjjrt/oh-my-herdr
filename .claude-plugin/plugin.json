@@ -1,6 +1,6 @@
 {
   "name": "oh-my-herdr",
-  "version": "0.4.3",
+  "version": "0.5.0-beta1",
   "description": "OmO-style multi-agent orchestration on herdr: Claude Code leads, worker agents run in herdr panes.",
   "author": {
     "name": "andyjjrt"
