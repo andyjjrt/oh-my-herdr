@@ -5,6 +5,7 @@
 // part, no run or a dormant server, every slot stays empty and nothing errors.
 
 import { Plugin } from '@opencode/plugin/tui'
+import { SyntaxStyle } from '@opentui/core'
 import { For, Show, createSignal, onMount } from 'solid-js'
 
 import { rpcApi, type RpcCapable } from '../rpc/client'
@@ -136,6 +137,33 @@ export default Plugin.define({
       )
     }
 
+    // /omh replies are markdown (tables, headings, code spans). dialog.alert draws them as plain text in a
+    // medium dialog, so the tables wrap and break: render them as markdown in an xlarge, scrollable dialog.
+    let syntax: SyntaxStyle | null = null
+    function showReply(title: string, text: string): boolean {
+      try {
+        syntax ??= SyntaxStyle.fromStyles({}, context.renderer.nativeScene)
+        const style = syntax
+        context.ui.dialog.show(() => (
+          <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+            <box flexDirection="row" justifyContent="space-between">
+              <text fg={color('base')}>
+                <b>{title}</b>
+              </text>
+              <text fg={color('muted')}>esc</text>
+            </box>
+            <scrollbox maxHeight={Math.max(10, (context.renderer.height ?? 40) - 10)}>
+              <markdown content={text} syntaxStyle={style} fg={color('base')} conceal tableOptions={{ widthMode: 'content', wrapMode: 'word' }} />
+            </scrollbox>
+          </box>
+        ))
+        context.ui.dialog.set({ size: 'xlarge' })
+        return true
+      } catch {
+        return false
+      }
+    }
+
     const offPanel = context.ui.slot({
       append: 'session.panel',
       render: panel => (
@@ -175,6 +203,7 @@ export default Plugin.define({
               return
             }
             void poll()
+            if (showReply(reply.title, reply.text)) return
             await context.ui.dialog.alert({ title: reply.title, message: reply.text }).catch(() =>
               context.ui.toast.show({ title: reply.title, message: reply.text, variant: reply.ok ? 'info' : 'warning', duration: 15_000 }),
             )
