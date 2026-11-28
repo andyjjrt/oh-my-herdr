@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0-beta2 — 2026-11-28
 
 ### Added
 
@@ -58,6 +58,9 @@
   and drops its `running` status entry; the plugin dispose aborts the subscriptions.
 - **The opencode TUI is type-checked.** `solid-js`, `@opentui/solid` and `@opentui/core` are dev
   dependencies at the versions opencode 2.4.2 ships, and the tsconfig includes `src/**/*.tsx`.
+
+- **`/omh` replies in the opencode TUI keep their tables.** Replies open in a wide, scrollable
+  dialog that renders markdown, instead of a plain-text alert that wrapped `/omh check`'s tables.
 
 ### Known limits
 
