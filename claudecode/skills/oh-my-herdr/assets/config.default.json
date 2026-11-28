@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "oh-my-herdr default: Claude Code leads; workers are Claude Code or senpi on OpenCode Go.",
+    "Copy to ~/.config/oh-my-herdr/config.json (global) or <project>/.omh/config.json (per project) and edit.",
+    "profiles.<name>.agent picks a launch definition (assets/agents.json, or \"agents\" below); args go to that agent's CLI.",
+    "family is used so a reviewer never shares a model family with the code it reviews.",
+    "agent \"subagent\" runs a Claude Code subagent of the lead instead of a pane: no startup wait, but only Claude models,",
+    "the lead's quota and permissions, and it ends with the lead. model: an alias (haiku, sonnet, opus) or id; subagent_type:",
+    "general-purpose, Explore or Plan (both read-only: their final reply is the report), or a plugin's agent.",
+    "backend: where pane workers run. auto = herdr panes inside herdr, else herdr-core (hc) terminals; herdr; hc. See docs/configuration.md.",
+    "Model IDs come from senpi's model registry (Nov 2026) — check with `senpi --list-models opencode-go`."
+  ],
+  "backend": "auto",
+  "hc": { "panes": "tab", "notify": false },
+
+  "lead": "claude-opus",
+  "max_concurrent": 5,
+  "max_panes_per_tab": 4,
+
+  "quota": {
+    "enabled": true,
+    "threshold": 95,
+    "cache_seconds": 120,
+    "on_unknown": "allow",
+    "providers": {
+      "claude":      { "enabled": true },
+      "opencode-go": { "enabled": true }
+    }
+  },
+
+  "agents": {},
+
+  "profiles": {
+    "claude-opus":   { "agent": "claude", "family": "claude", "args": ["--model", "opus"] },
+    "claude-sonnet": { "agent": "claude", "family": "claude", "args": ["--model", "sonnet", "--permission-mode", "auto"] },
+    "claude-review": { "agent": "claude", "family": "claude", "args": ["--model", "opus", "--permission-mode", "auto"] },
+
+    "sub-explore":   { "agent": "subagent", "family": "claude", "subagent_type": "Explore", "model": "haiku" },
+    "sub-haiku":     { "agent": "subagent", "family": "claude", "subagent_type": "general-purpose", "model": "haiku" },
+    "sub-sonnet":    { "agent": "subagent", "family": "claude", "subagent_type": "general-purpose", "model": "sonnet" },
+    "sub-review":    { "agent": "subagent", "family": "claude", "subagent_type": "Plan", "model": "opus" },
+
+    "go-deepseek":   { "agent": "senpi", "family": "deepseek", "args": ["--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--thinking", "max"] },
+    "go-fast":       { "agent": "senpi", "family": "deepseek", "args": ["--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--thinking", "low"] }
+  },
+
+  "categories": {
+    "oracle":             ["claude-review", "sub-review", "go-deepseek"],
+    "deep":               ["go-deepseek", "claude-sonnet", "sub-sonnet"],
+    "visual-engineering": ["claude-sonnet", "sub-sonnet", "go-deepseek"],
+    "explore":            ["sub-explore", "go-fast", "go-deepseek"],
+    "librarian":          ["sub-haiku", "go-fast", "go-deepseek"],
+    "quick":              ["sub-haiku", "go-fast", "go-deepseek"],
+    "writing":            ["go-deepseek", "sub-sonnet", "claude-sonnet"],
+    "reviewer":           ["claude-review", "sub-review", "go-deepseek"]
+  }
+}
