@@ -64,3 +64,9 @@ herdr pane run "$pane" "cd /repo && env HERDR_AGENT=pi senpi --provider opencode
 herdr agent get "$pane"            # fails until detected, then .result.agent.status = idle
 herdr agent rename "$pane" worker1 # from here on, address it by name
 ```
+
+The built-in `opencode` profile uses the same `command` launch so the pane gets `OMH_ROLE=worker`
+(the plugin is dormant there) while an interactive opencode worker starts:
+```bash
+herdr pane run "$pane" "cd /repo && env HERDR_AGENT=opencode OMH_ROLE=worker opencode"
+```

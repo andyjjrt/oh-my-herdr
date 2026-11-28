@@ -1,12 +1,12 @@
 {
   "_comment": [
-    "oh-my-herdr default: Claude Code leads; workers are Claude Code or senpi on OpenCode Go.",
+    "oh-my-herdr default: Claude Code or opencode leads; workers are Claude Code, opencode or senpi on OpenCode Go.",
     "Copy to ~/.config/oh-my-herdr/config.json (global) or <project>/.omh/config.json (per project) and edit.",
     "profiles.<name>.agent picks a launch definition (assets/agents.json, or \"agents\" below); args go to that agent's CLI.",
     "family is used so a reviewer never shares a model family with the code it reviews.",
-    "agent \"subagent\" runs a Claude Code subagent of the lead instead of a pane: no startup wait, but only Claude models,",
-    "the lead's quota and permissions, and it ends with the lead. model: an alias (haiku, sonnet, opus) or id; subagent_type:",
+    "agent \"subagent\" runs a Claude Code subagent; \"oc-subagent\" runs an opencode child session. Both start with the task instead of a pane: no startup wait, but they run on the lead's quota and permissions and end with the lead. model: an alias (haiku, sonnet, opus) or id; subagent_type:",
     "general-purpose, Explore or Plan (both read-only: their final reply is the report), or a plugin's agent.",
+    "The opencode profile starts an opencode worker in a herdr pane with OMH_ROLE=worker; it is not in any category by default.",
     "backend: where pane workers run. auto = herdr panes inside herdr, else herdr-core (hc) terminals; herdr; hc. See docs/configuration.md.",
     "Model IDs come from senpi's model registry (Nov 2026) — check with `senpi --list-models opencode-go`."
   ],
@@ -41,7 +41,9 @@
     "sub-review":    { "agent": "subagent", "family": "claude", "subagent_type": "Plan", "model": "opus" },
 
     "go-deepseek":   { "agent": "senpi", "family": "deepseek", "args": ["--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--thinking", "max"] },
-    "go-fast":       { "agent": "senpi", "family": "deepseek", "args": ["--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--thinking", "low"] }
+    "go-fast":       { "agent": "senpi", "family": "deepseek", "args": ["--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--thinking", "low"] },
+
+    "opencode":      { "agent": "opencode", "family": "opencode", "args": [] }
   },
 
   "categories": {

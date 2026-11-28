@@ -795,16 +795,26 @@ export function armWake(): void {
       await $.state.wake.set(w => ({ ...w, sections: [] }))
       // A section whose worker no longer holds its task is dropped; a settle table is rebuilt from the live state.
       const fresh: string[] = []
+      const usedGuards = new Map<string, () => Promise<string | null>>()
       for (const raw of sections) {
         const { text: section, spec } = decodeWake(raw)
         // The closure is gone after a reload; the persisted spec rebuilds the same check.
         const guard = rt.wakeGuards.get(section) ?? (spec === null ? undefined : spec.kind === 'wave' ? waveGuard(spec) : workerGuard(spec, section))
         rt.wakeGuards.delete(section)
+        if (guard) usedGuards.set(section, guard)
         const text = guard ? await guard().catch(() => section) : section
         if (text !== null) fresh.push(text)
       }
       if (fresh.length === 0) return
-      await $.prompt.submit({ text: fresh.join('\n\n---\n\n') })
+      try {
+        await $.prompt.submit({ text: fresh.join('\n\n---\n\n') })
+      } catch (err) {
+        // Do not lose the wake when the host is briefly unready (for example a lead whose session
+        // is not restored yet). The next flush or settle retries the same sections and their guards.
+        for (const [section, guard] of usedGuards) rt.wakeGuards.set(section, guard)
+        await $.state.wake.set(w => ({ ...w, sections: [...w.sections, ...sections] }))
+        throw err
+      }
     })().catch(err => log(`wake failed: ${(err as Error).message}`))
   })
 }

@@ -4,6 +4,19 @@
 
 import type { Display, Engine } from './host'
 
+/** The host whose subagent API a profile targets. */
+export type ConfigHost = 'claudecode' | 'opencode'
+
+let currentConfigHost: ConfigHost = 'claudecode'
+
+export function setConfigHost(host: ConfigHost): void {
+  currentConfigHost = host
+}
+
+export function configHost(): ConfigHost {
+  return currentConfigHost
+}
+
 /**
  * A named agent + model. For an agent whose launch is `subagent`, `model` (an alias or id) and
  * `subagentType` (`general-purpose`, `Explore`, a plugin's agent) say what Claude Code starts; `args`
@@ -21,6 +34,10 @@ export type DiagnoseRules = Partial<Record<string, string[]>>
 export type AgentSpec = {
   name: string
   launch: 'herdr-kind' | 'command' | 'subagent'
+  /** The host whose subagent API this launch uses; absent means claudecode for `launch: subagent`. */
+  host?: ConfigHost
+  /** Default child model for a subagent launch; a profile's `model` overrides it. */
+  model?: string
   kind?: string
   command?: string[]
   detect_as?: string
@@ -66,6 +83,8 @@ export type HcConfig = {
 export type Config = {
   file: string
   dir: string
+  /** Which host's subagent profiles this config may use. */
+  host: ConfigHost
   backend: BackendSetting
   hc: HcConfig
   lead: string | null
@@ -94,9 +113,12 @@ export function normalizeAgent(name: string, raw: unknown): AgentSpec {
   const launch = r.launch === 'command' ? 'command' : r.launch === 'subagent' ? 'subagent' : 'herdr-kind'
   const command = asStrings(r.command)
   const kind = typeof r.kind === 'string' ? r.kind : undefined
+  const host = r.host === 'opencode' ? 'opencode' : r.host === 'claudecode' ? 'claudecode' : undefined
   return {
     name,
     launch,
+    ...(host !== undefined && { host }),
+    ...(typeof r.model === 'string' && { model: r.model }),
     ...(kind !== undefined && { kind }),
     ...(command.length > 0 && { command }),
     ...(typeof r.detect_as === 'string' && { detect_as: r.detect_as }),
@@ -134,35 +156,46 @@ function normalizeProviders(raw: unknown): QuotaConfig['providers'] {
   return out
 }
 
-export function normalizeConfig(file: string, raw: unknown, builtinAgents: unknown): Config {
+export function normalizeConfig(file: string, raw: unknown, builtinAgents: unknown, host: ConfigHost = currentConfigHost): Config {
   const r = asRecord(raw)
   const q = asRecord(r.quota)
   const h = asRecord(r.hc)
-  const profiles: Record<string, Profile> = {}
-  for (const [name, p] of Object.entries(asRecord(r.profiles))) {
-    const pr = asRecord(p)
-    const agent = typeof pr.agent === 'string' ? pr.agent : typeof pr.kind === 'string' ? pr.kind : ''
-    profiles[name] = {
-      agent,
-      family: typeof pr.family === 'string' ? pr.family : 'unknown',
-      args: asStrings(pr.args),
-      ...('quota' in pr && { quota: typeof pr.quota === 'string' ? pr.quota : null }),
-      ...(typeof pr.model === 'string' && { model: pr.model }),
-      ...(typeof pr.subagent_type === 'string' && { subagentType: pr.subagent_type }),
-    }
-  }
-  const categories: Record<string, Category> = {}
-  for (const [name, c] of Object.entries(asRecord(r.categories))) categories[name] = normalizeCategory(c)
   const agents: Record<string, AgentSpec> = {}
   for (const [name, a] of Object.entries(asRecord(builtinAgents))) if (!name.startsWith('_')) agents[name] = normalizeAgent(name, a)
   for (const [name, a] of Object.entries(asRecord(r.agents))) {
     agents[name] = normalizeAgent(name, { ...asRecord(builtinAgents)[name] as Json, ...asRecord(a) })
   }
-  // A subagent profile always names its type, so `subagentType` alone marks one (providerOf reads it).
-  for (const p of Object.values(profiles)) if (agents[p.agent]?.launch === 'subagent' && p.subagentType === undefined) p.subagentType = 'general-purpose'
+  const profiles: Record<string, Profile> = {}
+  for (const [name, p] of Object.entries(asRecord(r.profiles))) {
+    const pr = asRecord(p)
+    const agent = typeof pr.agent === 'string' ? pr.agent : typeof pr.kind === 'string' ? pr.kind : ''
+    const spec = agents[agent]
+    const sub = spec?.launch === 'subagent'
+    const model = typeof pr.model === 'string' ? pr.model : sub ? spec.model : undefined
+    const subagentType = typeof pr.subagent_type === 'string' ? pr.subagent_type : sub ? (spec.kind ?? 'general-purpose') : undefined
+    profiles[name] = {
+      agent,
+      family: typeof pr.family === 'string' ? pr.family : 'unknown',
+      args: asStrings(pr.args),
+      ...('quota' in pr && { quota: typeof pr.quota === 'string' ? pr.quota : null }),
+      ...(model !== undefined && { model }),
+      ...(subagentType !== undefined && { subagentType }),
+    }
+  }
+  const categories: Record<string, Category> = {}
+  for (const [name, c] of Object.entries(asRecord(r.categories))) {
+    const category = normalizeCategory(c)
+    category.profiles = category.profiles.filter(p => {
+      const profile = profiles[p]
+      const spec = profile && agents[profile.agent]
+      return !(spec?.launch === 'subagent' && (spec.host ?? 'claudecode') !== host)
+    })
+    categories[name] = category
+  }
   return {
     file,
     dir: file.slice(0, file.lastIndexOf('/')),
+    host,
     backend: r.backend === 'herdr' || r.backend === 'hc' ? r.backend : 'auto',
     hc: { notify: h.notify === true, panes: h.panes === 'none' ? 'none' : 'tab' },
     lead: typeof r.lead === 'string' ? r.lead : null,
@@ -222,10 +255,11 @@ export function agentCallRule(cfg: Config, input: { subagent_type?: unknown; mod
   return { model: models[0] }
 }
 
-/** Whether a profile runs as a Claude Code subagent of the lead rather than in a herdr pane. */
+/** Whether a profile runs as a subagent of this host rather than in a herdr pane. */
 export function isSubagentProfile(cfg: Config, profile: string): boolean {
   const p = cfg.profiles[profile]
-  return p !== undefined && cfg.agents[p.agent]?.launch === 'subagent'
+  const spec = p && cfg.agents[p.agent]
+  return spec?.launch === 'subagent' && (spec.host ?? 'claudecode') === cfg.host
 }
 
 /** Problems that make a config unusable or a category misroute; empty when fine. */
@@ -306,7 +340,7 @@ export async function configCandidates($: Engine, omhDir: string): Promise<strin
   ]
 }
 
-export async function loadConfig($: Engine, omhDir: string): Promise<Config> {
+export async function loadConfig($: Engine, omhDir: string, host: ConfigHost = currentConfigHost): Promise<Config> {
   const builtin = JSON.parse(await $.fs.read(`${$.plugin.root}/skills/oh-my-herdr/assets/agents.json`)) as unknown
   for (const file of await configCandidates($, omhDir)) {
     if (!(await $.fs.exists(file))) continue
@@ -316,7 +350,7 @@ export async function loadConfig($: Engine, omhDir: string): Promise<Config> {
     } catch (err) {
       throw new Error(`invalid JSON in ${file}: ${(err as Error).message}`)
     }
-    return normalizeConfig(file, raw, builtin)
+    return normalizeConfig(file, raw, builtin, host)
   }
   throw new Error('no config.json found')
 }

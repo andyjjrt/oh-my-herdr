@@ -3,7 +3,7 @@
 // Claude Code needs real files in the plugin; this header also keeps the generated copy
 // distinct from the source in Git rename detection, so the source keeps its history.
 // The host contract the orchestration core is written against. Types only: this file must stay free
-// of any `claude-code` import (and of runtime code) so a second host can implement the same shapes.
+// of any Claude Code import (and of runtime code) so a second host can implement the same shapes.
 //
 // The Claude Code binding is claudecode/hooks/lib/engine.ts. A host supplies its own binding, then
 // installs it as `rt.$`; core/runtime.ts and the rest of core use only these members.

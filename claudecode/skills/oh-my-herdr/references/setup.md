@@ -1,20 +1,23 @@
 # Setup (for the user)
 
 Most of this needs the user's own logins, so hand these steps over rather than trying to do them.
-Default stack: **Claude Code** (lead + Claude-family workers) and **senpi** (open-model workers on
-OpenCode Go, DeepSeek by default).
+Default stack: **Claude Code or opencode** as the lead, and **senpi** (open-model workers on
+OpenCode Go, DeepSeek by default). The lead and the workers can be different hosts.
 
 ## 1. herdr
 ```bash
 brew install herdr                  # or: mise use -g herdr
 herdr integration install claude    # Claude Code reports its state to herdr
+herdr integration install opencode  # opencode reports its state to herdr
 herdr integration status
 ```
 senpi needs no herdr integration: it ships a builtin reporter that tells herdr its state
 (working / blocked / idle) whenever it runs inside a herdr pane. It reports itself as agent `pi`.
 python3 must be on PATH (the mod's watcher bridges herdr's event socket with it).
 
-## 2. Claude Code and the plugin
+## 2. Hosts and plugins
+
+### Claude Code
 ```bash
 claude                                                   # log in once with your Pro/Max account
 /plugin marketplace add <owner>/oh-my-herdr              # inside Claude Code
@@ -27,6 +30,29 @@ sources.
 
 Claude Code workers ask "Is this a project you created or one you trust?" the first time they open
 a folder. Accept it once for each project you orchestrate in, or the worker stays blocked.
+
+### opencode
+Requires **opencode ≥ 2.4.2** (the V2 plugin API). Install the plugin in the project's
+`opencode.json` (or in the global opencode config):
+```json
+{
+  "plugins": [
+    { "package": "/path/to/oh-my-herdr/opencode", "options": { "display": "statusline" } }
+  ]
+}
+```
+Run opencode as the **lead** in a herdr pane:
+```bash
+opencode                         # in the project; /ulw <goal> and /omh <sub> are server commands
+```
+The opencode server must not have `OMH_ROLE=worker` in its environment (a worker pane does). The
+plugin is dormant in worker panes by design. `opencode` renders `/omh` answers as a synthetic
+message; the immediate TUI picker belongs to the optional TUI part.
+
+For repo development, point `package` at `<repo>/opencode`; the published npm package comes later.
+The same `.omh/` files, tools and commands are used as in Claude Code; only the names differ
+(`omh_*` instead of `mcp__oh-my-herdr__omh_*`, `subagent` instead of `Agent`, `shell` instead of
+`Bash`).
 
 ## 3. senpi
 ```bash
@@ -78,6 +104,7 @@ Shape:
                        "args": ["--model", "sonnet", "--permission-mode", "auto"] },
     "go-deepseek":   { "agent": "senpi",  "family": "deepseek",
                        "args": ["--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--thinking", "max"] },
+    "opencode":      { "agent": "opencode", "family": "opencode", "args": [] },
     "sub-explore":   { "agent": "subagent", "family": "claude", "subagent_type": "Explore", "model": "haiku" }
   },
   "categories": {
@@ -87,8 +114,9 @@ Shape:
   }
 }
 ```
+- `opencode` is a pane worker profile, not a category member by default: add `"opencode"` to a category only when the user wants opencode workers. `oc-subagent` is the opt-in child-session profile, also not routed by default.
 - Pane workers open in `omh-workers` tabs of the lead's own workspace, so a new tab lands after the lead's tabs (herdr appends; it has no call to place a tab elsewhere). A tab takes `max_panes_per_tab` panes (default 4: the root, then splits right and down in turn); the next worker opens `omh-workers-2`, and so on. A pane freed by `omh_teardown` is used again. Subagent workers take no pane.
-- `agent`: a launch definition name. Built in (`assets/agents.json`): `claude`, `senpi`, `subagent`.
+- `agent`: a launch definition name. Built in (`assets/agents.json`): `claude`, `senpi`, `opencode`, `subagent` (Claude Code subagent) and `oc-subagent` (opencode child session).
 - `model`, `subagent_type` (subagent profiles only): the model alias or id (left out: the agent's own, else the lead's) and the agent type (`general-purpose` by default; `Explore` and `Plan` are read-only, which is fine: a subagent's final reply is saved as its result.md).
 - `args`: passed unchanged to that agent's CLI — model, reasoning level, approval flags.
 - `family`: any label; reviewers are routed outside the reviewed task's family.
@@ -98,13 +126,14 @@ Shape:
 ```jsonc
 "agents": {
   "claude": { "launch": "herdr-kind", "kind": "claude" },
+  "opencode": { "launch": "command", "command": ["opencode"], "detect_as": "opencode" },
   "senpi":  { "launch": "command", "command": ["senpi"], "detect_as": "pi", "stall_seconds": 45,
               "diagnose": { "config-error": ["Model is unavailable"] } }
 }
 ```
 - `herdr-kind` → `herdr agent start <name> --kind <kind> --pane <pane> -- <args>`.
-- `command` → runs `env HERDR_AGENT=<detect_as> OMH_ROLE=worker [env…] <command> <args>` in the pane, waits until herdr detects the agent, then names it. For forks and wrappers herdr doesn't know.
-- `subagent` → no pane: the lead starts a Claude Code subagent (`$.subagent.spawn`) with the task's brief, watches it through `$.subagent.list()` and its end, and saves its final reply as result.md. It starts at once and costs no pane, but runs only Claude models on the lead's own quota and permissions, can't be looked at or typed into like a pane, isn't reused for a second task, and ends with the lead's session. `omh_spawn` can't start one ahead of time; it starts with its dispatch. Good for `explore`, `quick` and read-only reviews; keep long implementation and other providers in panes.
+- `command` → runs `env HERDR_AGENT=<detect_as> OMH_ROLE=worker [env…] <command> <args>` in the pane, waits until herdr detects the agent, then names it. For forks and wrappers herdr doesn't know. The built-in `opencode` agent uses this to start an opencode **worker** with `OMH_ROLE=worker`; it reports on herdr only, not hc.
+- `subagent` → no pane: the lead starts a host subagent. `subagent` is a Claude Code subagent; `oc-subagent` is an opencode child session. It starts at once and costs no pane, but runs only that host's models on the lead's own quota and permissions, can't be looked at or typed into like a pane, isn't reused for a second task, and ends with the lead's session. `omh_spawn` can't start one ahead of time; it starts with its dispatch. Good for `explore`, `quick` and read-only reviews; keep long implementation and other providers in panes.
 - `stall_seconds` (default 30): how long after a dispatch the worker may take to start working before it counts as stalled.
 - `diagnose`: extra screen patterns (regular expressions) per verdict — `quota-exhausted`, `permission-prompt`, `config-error`, `crashed`, `interrupted` — added to the built-in ones. When the lead is told a worker stopped with `unknown`, the screen excerpt is what to turn into a new pattern here.
 
@@ -144,7 +173,8 @@ Run `/omh check` after editing; it flags undefined profiles and missing executab
 provider every profile maps to. `/omh quota` shows current usage.
 
 ## 5. Start working
-Run Claude Code in a herdr pane inside the project, then `/ulw <goal>`. Add `.omh/` to `.gitignore`.
+Run Claude Code or opencode in a herdr pane inside the project, then `/ulw <goal>`. Add `.omh/` to
+`.gitignore`.
 Every finished task is logged to `~/.local/state/oh-my-herdr/history.jsonl` (intent, category,
 profile, outcome, duration and the lead's one-line quality note).
 

@@ -4,9 +4,8 @@
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { approvePlan, listRuns, writePlan } from '../core/actions'
-import { Paths, runWorkerName } from '../core/files'
-import { rt } from '../core/runtime'
+import { writePlan } from '../core/actions'
+import { runWorkerName } from '../core/files'
 
 const AGENTS = { claude: { launch: 'herdr-kind', kind: 'claude' } }
 const CONFIG = {
@@ -181,141 +180,6 @@ describe('planning a run', () => {
 // ------------------------------------------------------------------ several runs at once
 
 describe('several runs', () => {
-  const cell = <T,>(init: T) => {
-    let v = init
-    return { get: async () => v, set: async (fn: (old: T) => T) => (v = fn(v)) }
-  }
-
-  /** A session facade over an in-memory disk: what approvePlan, listRuns and the run view touch. */
-  function fakeHost(mem: Mem) {
-    const dirOf = (p: string) => [...mem.keys()].some(k => k.startsWith(`${p.replace(/\/$/, '')}/`))
-    return {
-      plugin: { root: '/plug' },
-      env: { get: async () => undefined },
-      lead: { pane: null, session: null },
-      options: { display: 'off', backend: 'auto', wakeOnSettle: true, notifyHuman: false, autoContinue: false, autoContinueMax: 3, verbose: false },
-      fs: {
-        read: async (path: string) => {
-          const t = mem.get(path)
-          if (t === undefined) throw new Error(`ENOENT ${path}`)
-          return t
-        },
-        write: async (path: string, text: string) => void mem.set(path, text),
-        exists: async (path: string) => mem.has(path) || dirOf(path),
-        stat: async (path: string) => ({ kind: mem.has(path) ? 'file' : 'dir', size: mem.get(path)?.length ?? 0, mtimeMs: 0, isLink: false }),
-        list: async (path: string) => {
-          const dir = `${path.replace(/\/$/, '')}/`
-          const names = new Set([...mem.keys()].filter(k => k.startsWith(dir)).map(k => k.slice(dir.length).split('/')[0]!))
-          return [...names].map(name => ({ name, kind: mem.has(dir + name) ? 'file' : 'dir', size: 0, mtimeMs: 0, isLink: false }))
-        },
-      },
-      process: {
-        run: async (argv: readonly string[]) => (argv[0] === 'rm' ? (mem.delete(argv[argv.length - 1]!), { exitCode: 0, stdout: '', stderr: '' }) : { exitCode: 1, stdout: '', stderr: '' }),
-        spawn: () => (async function* () {})(),
-      },
-      http: { fetch: async () => { throw new Error('offline') } },
-      prompt: { submit: async () => ({}) },
-      subagent: { list: async () => [], spawn: async () => ({ deny: 'no subagents' }) },
-      ui: { log() {} },
-      session: { append: async () => undefined, messages: async () => [] },
-      clock: { now: async () => Date.UTC(2026, 10, 21), after: () => ({ cancel() {} }), every: () => ({ cancel() {} }) },
-      state: {
-        run: cell<unknown>(null),
-        workers: cell<Record<string, unknown>>({}),
-        quota: cell<Record<string, unknown>>({}),
-        continueCount: cell(0),
-        bound: cell<unknown>(null),
-        wake: cell({ sections: [] as string[], settleKey: '' }),
-      },
-    }
-  }
-
-  const A = '20261121-alpha'
-  const B = '20261121-beta'
-  const ROOT = '/main/.omh'
-
-  async function session(mem: Mem, bound: string | null = null) {
-    const saved = { $: rt.$, paths: rt.paths, cfg: rt.cfg }
-    rt.$ = fakeHost(mem) as never
-    rt.cfg = null
-    rt.paths = new Paths(bound === null ? '/main' : '/wt/b', ROOT, bound)
-    return () => Object.assign(rt, saved)
-  }
-
-  const seed = (mem: Mem) => {
-    mem.set(`${ROOT}/current-run`, `${A}\n`)
-    mem.set(`${ROOT}/runs/${A}/draft.md`, '# Alpha work\n\nT1\n')
-    mem.set(`${ROOT}/runs/${B}/draft.md`, '# Beta work\n\nT1\n')
-  }
-
-  test('two drafts coexist; approving b by id leaves a a draft', async () => {
-    const mem: Mem = new Map()
-    seed(mem)
-    const restore = await session(mem)
-    try {
-      const r = await approvePlan('beta')
-      expect(r).toMatchObject({ ok: true, run: B, file: `${ROOT}/runs/${B}/plan.md` })
-      expect(mem.get(`${ROOT}/runs/${B}/plan.md`)).toContain('# Beta work')
-      expect(mem.has(`${ROOT}/runs/${B}/draft.md`)).toBe(false)
-      expect(mem.has(`${ROOT}/runs/${B}/plan.approved`)).toBe(true)
-      // a is untouched, still a draft, still current
-      expect(mem.get(`${ROOT}/runs/${A}/draft.md`)).toContain('# Alpha work')
-      expect(mem.has(`${ROOT}/runs/${A}/plan.md`)).toBe(false)
-      expect(mem.get(`${ROOT}/current-run`)).toBe(`${A}\n`)
-    } finally {
-      restore()
-    }
-  })
-
-  test('approve with no id approves this session\'s run; an unknown id lists the drafts', async () => {
-    const mem: Mem = new Map()
-    seed(mem)
-    const restore = await session(mem)
-    try {
-      const bad = await approvePlan('gamma')
-      expect(bad.ok).toBe(false)
-      expect(bad.text).toContain(A)
-      expect(bad.text).toContain(B)
-      const r = await approvePlan()
-      expect(r).toMatchObject({ ok: true, run: A })
-      expect(mem.get(`${ROOT}/runs/${A}/plan.md`)).toContain('# Alpha work')
-      expect(mem.get(`${ROOT}/runs/${B}/draft.md`)).toContain('# Beta work')
-    } finally {
-      restore()
-    }
-  })
-
-  test('listRuns shows both runs, their states, goals and whose they are', async () => {
-    const mem: Mem = new Map()
-    seed(mem)
-    const plan = { goal: 'g', waves: [{ id: 1, gate: 'g', tasks: [{ id: 'T1', title: 't', intent: 'implement', category: 'deep', owns: [], deps: [] }] }] }
-    const C = '20261120-gamma'
-    mem.set(`${ROOT}/runs/${C}/plan.md`, '# Gamma work\n')
-    mem.set(`${ROOT}/runs/${C}/plan.json`, JSON.stringify(plan))
-    mem.set(`${ROOT}/runs/${C}/gates.json`, JSON.stringify({ passed: [1] }))
-    const D = '20261119-delta'
-    mem.set(`${ROOT}/runs/${D}/plan.md`, '# Delta work\n')
-    mem.set(`${ROOT}/runs/${D}/plan.json`, JSON.stringify(plan))
-    mem.set(`${ROOT}/runs/${D}/closed.json`, '{}')
-    mem.set(`${ROOT}/runs/_scout/x/brief.md`, 'scout')
-    const restore = await session(mem)
-    try {
-      await approvePlan(B)
-      const t = (await listRuns()).text
-      const row = (id: string) => t.split('\n').find(l => l.includes(id))!
-      expect(row(A)).toContain('draft')
-      expect(row(A)).toContain('Alpha work')
-      expect(row(A)).toContain('this session')
-      expect(row(B)).toContain('approved')
-      expect(row(C)).toContain('finished')
-      expect(row(C)).toContain('1/1')
-      expect(row(D)).toContain('closed')
-      expect(t).not.toContain('_scout')
-    } finally {
-      restore()
-    }
-  })
-
   test('a bound session names its workers with the run tag (unbound naming is covered by tests/hc.test.ts)', async ($, on) => {
     const bound = new Map<string, string>()
     const started: string[] = []

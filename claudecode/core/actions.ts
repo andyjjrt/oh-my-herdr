@@ -707,7 +707,7 @@ export async function draftPlan(markdown: string, name?: string): Promise<Answer
   await logEvent('draft', run, { lines, digest: draftDigest(markdown) })
   if (another) {
     return ok(
-      `draft written for run ${run}: ${p.draft(run)} (${lines} lines). It is not approved yet. This session stays bound to ${p.boundRun}: it does not approve or work ${run}. Tell the user: \`/omh approve ${run}\` approves it from another Claude (one in the same checkout is fine), or from this one once ${p.boundRun} is finished or closed. Then END YOUR TURN.`,
+      `draft written for run ${run}: ${p.draft(run)} (${lines} lines). It is not approved yet. This session stays bound to ${p.boundRun}: it does not approve or work ${run}. Tell the user: \`/omh approve ${run}\` approves it from another session (one in the same checkout is fine), or from this one once ${p.boundRun} is finished or closed. Then END YOUR TURN.`,
     )
   }
   return ok(
@@ -1071,7 +1071,7 @@ export async function check(): Promise<Answer> {
   const agents: string[][] = []
   for (const a of new Set(Object.values(cfg.profiles).map(pr => pr.agent))) {
     const spec = cfg.agents[a]
-    if (spec?.launch === 'subagent') agents.push([a, 'subagent', '✅ a Claude Code subagent of this session'])
+    if (spec?.launch === 'subagent') agents.push([a, 'subagent', '✅ a subagent of this session'])
     else if (!spec) agents.push([a, '', '⛔ unknown agent'])
     else agents.push([a, spec.launch, (await which(spec.bin)) ? `✅ ${code(spec.bin)}${versions[a] ? ` ${versions[a]}` : ''}` : `⛔ missing ${code(spec.bin)}`])
   }
@@ -1187,7 +1187,7 @@ export async function approveRun(runId?: string, force = false): Promise<Approve
     }
     if (p.boundRun !== null && target !== p.boundRun && !(await isClosed(p.boundRun)) && !(await isFinished(p.boundRun))) {
       return fail(
-        `this session is bound to run ${p.boundRun}, which is neither finished nor closed. Finish it (omh_status finish) and close it (/omh close) first, or approve ${target} from another Claude.`,
+        `this session is bound to run ${p.boundRun}, which is neither finished nor closed. Finish it (omh_status finish) and close it (/omh close) first, or approve ${target} from another session.`,
       )
     }
   }
@@ -1220,7 +1220,7 @@ async function approveUnbound(run: string): Promise<Approved> {
   const a = await approvePlan(run)
   if (!a.ok || a.run === undefined) return a
   await logEvent('approved', a.run, { file: a.file, drop: true })
-  return { ok: true, text: `${a.text}\nNo session leads ${a.run} yet: /omh approve ${a.run} in the Claude that will lead it.` }
+  return { ok: true, text: `${a.text}\nNo session leads ${a.run} yet: /omh approve ${a.run} in the session that will lead it.` }
 }
 
 /**

@@ -5,7 +5,8 @@
 // Workers that are subagents of the lead (the host's $.subagent capability) instead of agents in herdr
 // panes. Pure. A subagent worker is recorded like any other, its `pane` spelled `agent:<id>`, and
 // fed to the same state machine (settle.ts): its status comes from `$.subagent?.list()` and its end
-// from `turn.complete`, whose answer is its report.
+// from the host's completion callback (turn.complete for Claude Code, execution events for opencode),
+// whose answer is its report.
 
 import type { OmhWorker } from './types'
 
