@@ -1,5 +1,84 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **opencode host.** `opencode/` is an opencode V2 plugin package (`oh-my-herdr-opencode`, opencode
+  2.4.2 or newer) that runs the same loop with an opencode session as the lead: the five `omh_*`
+  tools and `/ulw`/`/omh`, wake-ups through a queued `session.synthetic`, the file-ownership guards
+  on `edit`/`write`/`patch`, the built-in `subagent` guard, idle auto-continue, the board after
+  compaction, and a TUI part for the status line, the board/plan panel and immediate `/omh`.
+  See [docs/opencode.md](docs/opencode.md). Install it from the repository checkout for now; the
+  npm package is not published yet.
+- **Opt-in `oc-subagent` child sessions.** An opencode profile can run a task in a child session
+  instead of a herdr pane. It is never routed by default: force `profile` on a dispatch, or add the
+  profile to a category. See
+  [docs/opencode.md](docs/opencode.md#opt-in-opencode-child-sessions).
+- **Host-aware subagent profiles.** An agent definition's `host` field (`claudecode` or
+  `opencode`) keeps a subagent profile on the host that can run it; `oc-subagent` is the opencode
+  child-session agent. A config filters the other host's subagent profiles out of the categories.
+- **Portable core tests.** The host-neutral suites live in `core/tests/` and run with plain
+  `bun test core/`, without `claude-code/testing`. `core/testing/fake-host.ts` is a complete
+  `Engine` used by the core and Claude Code suites.
+
+### Changed
+
+- **One repo, three parts.** Host-neutral code is in `core/`, the shared skill and assets in
+  `skills/`, the Claude Code plugin in `claudecode/` (the marketplace source) and the opencode
+  plugin in `opencode/`. `bun scripts/sync.ts` copies `core/` and `skills/` into `claudecode/` and
+  generates its type contract; `bun scripts/sync.ts --check` fails when they drift. Edit `/core`
+  and `/skills`, then run the sync.
+- **The Claude Code marketplace install is unchanged**, now sourced from `./claudecode`; the
+  plugin copies remain committed so Claude Code installs a self-contained directory.
+
+### Fixed
+
+- **opencode state is per lead.** Every storage cell is keyed by
+  `sha256(omh + "\0" + root + "\0" + pane)` (or `sha256(omh + "\0" + root)` without a pane), so
+  two panes in one checkout, a main checkout and its worktrees, and separate projects served from
+  one opencode data directory never share bound runs, workers, wake sections, continue counters or
+  quota caches. Booting one lead no longer clears another's binding.
+- **Several opencode leads and one `.omh` across hosts.** A Claude Code lead and an opencode lead can
+  run side by side on one `.omh`; approving a run held by another live pane is refused without
+  `force`. In one pane the run can move Claude Code → opencode → Claude Code: `lead.json`'s pane
+  lets the new host bind without force, `reconcile` adopts the live worker, and the next settle wakes
+  the new lead. See [docs/opencode.md](docs/opencode.md#switching-hosts).
+- **Wake-ups get fresh ids.** Two settlements with identical text both reach
+  `session.synthetic`; a failed submit puts its sections back for the next flush. The lead session is
+  restored from `runs/<run>/lead.json` at boot, so a server restart does not strand a waiting wave.
+- **The `subagent` guard is live before a run is bound.** It matches CC's timing, maps opencode's
+  `general` agent to `general-purpose`, and strips a model the config does not route. `/ulw` lists
+  the `oc-subagent` kinds the config actually allows.
+- **Read-only synthetic messages do not start a model turn.** The compaction board and `/omh` answers
+  other than `approve` use `resume: false`.
+- **Lost child-session streams settle correctly.** An `oc-subagent` keeps polling `session.get`
+  while a dropped stream has no terminal outcome, recovers the real outcome when it appears, and only
+  aborts/removes the child if it gives up. A rejected prompt or failed subscribe removes the child
+  and drops its `running` status entry; the plugin dispose aborts the subscriptions.
+- **The opencode TUI is type-checked.** `solid-js`, `@opentui/solid` and `@opentui/core` are dev
+  dependencies at the versions opencode 2.4.2 ships, and the tsconfig includes `src/**/*.tsx`.
+
+### Known limits
+
+- **One opencode lead per server process.** The runtime is process-wide, so two opencode sessions
+  in one server share the lead; the latest `omh_*` call claims it. Run one `opencode` process per
+  pane/worktree lead for separate per-lead state.
+- **A restart keeps the old lead until the new session acts.** The lead session is restored from
+  `lead.json`; after the TUI opens a new session, run `/ulw`, `/omh approve` or an `omh_*` tool in
+  it (or continue the previous session) to move the lead.
+- **Run a lead with its own `opencode`, not a shared service.** `opencode serve --service` inherits
+  the environment of the pane that first started it; a service started from a worker stays dormant
+  for every project, and one started from a lead records the wrong pane.
+- **No pane outside herdr.** An opencode server that did not inherit `HERDR_PANE_ID` records
+  `lead.json` without a pane; wake-ups still work through the session.
+- **The file guard starts at the claim.** Edits are checked only after the session has run `/ulw`,
+  `/omh` or an `omh_*` tool and is bound to a run. The `subagent` guard is live from the claim, even
+  before a run is bound.
+- **opencode has no compact tool rows**, so `omh_*` results are capped at 12,000 characters.
+- **Plugin options do not fall back to `.omh/config.json`.** Apart from `backend`, they come only
+  from the plugin entry in `opencode.json`.
+
 ## 0.5.0-beta1 — 2026-11-22
 
 ### Added

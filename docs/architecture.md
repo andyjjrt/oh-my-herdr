@@ -1,9 +1,31 @@
 # Architecture
 
-oh-my-herdr is a Claude Code **mod** (`claudecode/`) plus a **skill** (`skills/oh-my-herdr/`). The skill
-teaches the lead the workflow; the mod does the bookkeeping: it gives the lead its `omh_*` tools,
-starts and watches workers, and wakes the lead when there is something to do. The files under
-`.omh/` are the source of truth; the mod's in-memory state is rebuilt from them after a reload.
+oh-my-herdr is one shared core (`core/`) with two host adapters: a Claude Code **mod**
+(`claudecode/`) and an opencode V2 **plugin** (`opencode/`). Both use the **skill**
+(`skills/oh-my-herdr/`). The skill teaches the lead the workflow; the adapter does the bookkeeping:
+it gives the lead its `omh_*` tools, starts and watches workers, and wakes the lead when there is
+something to do. The files under `.omh/` are the source of truth; the adapter's in-memory state is
+rebuilt from them after a reload.
+
+## Three parts, two hosts
+
+The repository has three parts:
+
+- `core/` — host-neutral orchestration: actions, routing, settle, plan, text, config, quota, the
+  herdr and hc CLIs, and the `Engine` contract in `core/host.ts`. It imports no host SDK.
+- `skills/` — the shared `oh-my-herdr` skill and its assets (`agents.json`, `config.default.json`,
+  preambles, `omh-watch.py`), plus the bundled herdr skills.
+- `claudecode/` and `opencode/` — the host adapters. `claudecode/hooks/lib/engine.ts` binds the
+  Claude Code plugin API to `Engine`; `opencode/src/server/engine.ts` binds opencode V2's plugin
+  context (node `fs`, `child_process`, timers, `fetch`, `ctx.storage`) to the same contract.
+  `claudecode/hooks/register.tsx` and `opencode/src/server/index.ts` hold each host's wiring.
+
+`.claude-plugin/marketplace.json` stays at the repository root and points its plugin at
+`./claudecode`. Claude Code copies only the plugin's source directory on install, so `claudecode/`
+must be self-contained: `bun scripts/sync.ts` copies `core/` (with a generated header) and `skills/`
+into `claudecode/`, and writes `claudecode/types/index.d.ts`. `bun scripts/sync.ts --check` exits 1
+and names every file that differs. `opencode/` imports `core/` and `skills/` directly from the
+repository.
 
 ## The pieces
 
@@ -29,9 +51,17 @@ flowchart TB
   mod -->|usage APIs · commands| quota[(Quota)]
 ```
 
+The diagram shows the Claude Code host. The opencode host has the same shape:
+`opencode/src/server/index.ts` registers tools, commands and hooks over
+`opencode/src/server/engine.ts`, and wakes the lead through `session.synthetic`.
+
 | Module | Does |
 | --- | --- |
+| `core/host.ts` | The `Engine` contract both hosts implement |
 | `claudecode/hooks/register.tsx` | Claude Code wiring: tools, commands, render sites, guards. Dormant outside herdr and in worker panes (`OMH_ROLE=worker`) |
+| `claudecode/hooks/lib/engine.ts` | The Claude Code binding of `Engine` |
+| `opencode/src/server/index.ts` | opencode V2 wiring: tools, commands, guards, auto-continue, compaction, timers. Dormant in worker panes |
+| `opencode/src/server/engine.ts` | The opencode binding: node fs and processes, timers, fetch, `ctx.storage` |
 | `core/actions.ts` | What each tool and command does: dispatch, spawn, collect, status, check, teardown |
 | `core/runtime.ts` | The live side: watchers, timers, alerts, wake-ups, quota refresh, reconcile after a reload |
 | `core/settle.ts` | The worker state machine (pure) |
@@ -208,8 +238,8 @@ stateDiagram-v2
 
 | | Pane worker | Subagent worker |
 | --- | --- | --- |
-| Status from | herdr's event stream, or `hc events` for an hc worker (`scripts/omh-watch.py`) | `$.subagent.list()` every 10 s |
-| End | idle or done on screen | its `turn.complete` |
+| Status from | herdr's event stream, or `hc events` for an hc worker (`skills/oh-my-herdr/scripts/omh-watch.py`) | the host's subagent API: `$.subagent.list()` in Claude Code, `session.execution.*` events in opencode |
+| End | idle or done on screen | `turn.complete` in Claude Code, the child's execution event in opencode |
 | Report | writes `result.md`, replies `DONE <path>` | its final reply, saved as `result.md` by the mod |
 | Diagnosis reads | the pane's screen | its status, end reason and answer |
 

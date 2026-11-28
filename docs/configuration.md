@@ -38,10 +38,10 @@ family for a review.
 
 | Profile field | Meaning |
 | --- | --- |
-| `agent` | How the worker starts: `claude`, `pi`, `senpi` or `subagent` built in ([agents.json](../skills/oh-my-herdr/assets/agents.json)), or one of `agents` |
+| `agent` | How the worker starts: `claude`, `pi`, `senpi`, `opencode`, `subagent` or `oc-subagent` built in ([agents.json](../skills/oh-my-herdr/assets/agents.json)), or one of `agents` |
 | `args` | Passed unchanged to that agent's CLI: model, reasoning level, permission flags |
 | `family` | Any label; a reviewer is routed outside the reviewed task's family |
-| `model`, `subagent_type` | Subagent profiles only: the model alias or id, and the agent type (`general-purpose` by default) |
+| `model`, `subagent_type` | Subagent profiles only: the model alias or id, and the agent type. `general-purpose` by default in Claude Code; `oc-subagent` takes its `kind` (`general`) and `model` from the agent definition unless the profile overrides them ([opencode.md](opencode.md#opt-in-opencode-child-sessions)) |
 | `quota` | The provider it bills, when it can't be inferred; `null` skips checks ([quota.md](quota.md)) |
 
 The categories the lead uses are `explore`, `librarian`, `quick`, `deep`, `visual-engineering`,
@@ -61,16 +61,17 @@ flowchart LR
 | | Pane worker | Subagent worker |
 | --- | --- | --- |
 | Starts | in 10 to 30 s | at once |
-| Models | any agent and provider | Claude models only |
-| Quota and permissions | its own | the lead's |
+| Models | any agent and provider | the lead host's subagents: Claude models in Claude Code, the `oc-subagent` model (any opencode model) in opencode |
+| Quota and permissions | its own | Claude Code: the lead's. opencode: the profile's model and provider |
 | Look at it | switch to its pane | its transcript only |
 | Reused | yes, for the next task on its profile | no, one task |
 | Outlives the lead | yes | no |
 
 Subagents suit `explore`, `quick` and read-only reviews; keep long implementation and other
 providers in panes. `Explore` and `Plan` subagents are read-only, which is fine: a subagent's final
-reply is saved as its `result.md`. A subagent waiting on a permission prompt asks in the lead's
-session.
+reply is saved as its `result.md`. In Claude Code, a subagent waiting on a permission prompt asks in
+the lead's session. In opencode, subagent profiles are opt-in child sessions
+([opencode.md](opencode.md#opt-in-opencode-child-sessions)).
 
 The built-in config mixes them:
 
@@ -83,6 +84,13 @@ The built-in config mixes them:
 | deep | go-deepseek → claude-sonnet → ◆ sub-sonnet |
 | visual-engineering | claude-sonnet → ◆ sub-sonnet → go-deepseek |
 | writing | go-deepseek → ◆ sub-sonnet → claude-sonnet |
+
+In opencode the Claude Code subagent profiles are hidden, so these categories fall through to their
+pane profiles.
+
+The built-in config also defines an `opencode` pane profile (opencode as a worker in a herdr pane,
+started with `OMH_ROLE=worker`). No category routes to it; add `"opencode"` to a category when you
+want opencode workers. It reports status on herdr only, so routing skips it on the hc backend.
 
 ### The lead's own subagents
 
@@ -97,12 +105,16 @@ those calls to the subagent profiles the categories route to:
 With the built-in config the lead may start `Explore` on haiku, `general-purpose` on haiku or
 sonnet and `Plan` on opus. `/ulw` tells the lead which ones it has.
 
+In opencode the same rule applies to the built-in `subagent` tool, over `oc-subagent` profiles. No
+category routes to one by default, so the tool is denied there until you add such a route
+([opencode.md](opencode.md#opt-in-opencode-child-sessions)).
+
 ## Where workers run: herdr or herdr-core
 
 Pane workers run either in **herdr** panes or in **herdr-core** (`hc`) terminals, the core that the
-[Herdr desktop app](https://github.com/herdrdev/herdr-app) is a window on. The plugin option
-**Worker backend** (`/plugin` → oh-my-herdr → configure) picks, for every project; a `backend` other
-than `auto` in config.json overrides it for that config:
+[Herdr desktop app](https://github.com/herdrdev/herdr-app) is a window on. The **Worker backend**
+option (`/plugin` → oh-my-herdr → configure in Claude Code, `opencode.json` in opencode) picks, for
+every project; a `backend` other than `auto` in config.json overrides it for that config:
 
 ```jsonc
 {
@@ -120,9 +132,9 @@ than `auto` in config.json overrides it for that config:
 | `herdr` | herdr panes; refused when the lead is not in herdr |
 | `hc` | hc terminals, wherever the lead runs |
 
-The mod wakes up when the lead runs in herdr (`HERDR_ENV=1`) or in an hc terminal
-(`HC_TERMINAL_ID`: a Herdr app pane, or `hc run claude`). Workers already running keep the backend
-they started on, so changing `backend` mid-run is safe.
+In Claude Code, the mod wakes up when the lead runs in herdr (`HERDR_ENV=1`) or in an hc terminal
+(`HC_TERMINAL_ID`: a Herdr app pane, or `hc run claude`); opencode wakes through the lead's session.
+Workers already running keep the backend they started on, so changing `backend` mid-run is safe.
 
 With hc:
 
@@ -137,7 +149,7 @@ With hc:
   `max_panes_per_tab` to a tab, through the app's `herdr.space` and `herdr.tab` labels. With
   `none` they stay sub-agents of the lead: in the agents list, opened with a click. Outside the app
   they are plain hc terminals: `hc ls`, `hc attach <address>`.
-- **hc's own notes are off** (`hc.notify`): the lead is a Claude Code prompt, and the mod already
+- **hc's own notes are off** (`hc.notify`): the lead is a host session, and the adapter already
   wakes it.
 - There are no desktop notifications.
 
@@ -188,7 +200,12 @@ only record state (`close` needs `force` for an unfinished run) and never touch 
 | --- | --- |
 | `herdr-kind` | `herdr agent start <name> --kind <kind> --pane <pane> -- <args>` |
 | `command` | running `<command> <args>` in the pane with `HERDR_AGENT=<detect_as>`, then naming the agent herdr detects. For forks and wrappers herdr doesn't know |
-| `subagent` | `$.subagent.spawn` in the lead's session: no pane |
+| `subagent` | A subagent of the lead: `$.subagent.spawn` in Claude Code, a child session in opencode (*opt-in*, see [opencode.md](opencode.md#opt-in-opencode-child-sessions)) |
+
+An agent whose launch is `"subagent"` can carry a `host`: `claudecode` (the default) or `opencode`.
+A config filters the subagent profiles of the other host out of the categories, so one profile list
+serves both.
+`oc-subagent` is the opencode child-session agent in `skills/oh-my-herdr/assets/agents.json`.
 
 `reports`, `min_version` and `version_cmd` say whether an agent can report its status to the backend:
 
@@ -205,16 +222,20 @@ an agent that cannot report on the backend in use and falls through to the next 
 `stall_seconds` (default 30) is how long a worker may take to start working after a dispatch.
 `diagnose` adds screen patterns (regular expressions) per verdict to the built-in ones.
 
-## Mod options (in `/plugin`)
+## Options
+
+In Claude Code these are in `/plugin` → oh-my-herdr → configure; in opencode, in the plugin's
+`options` object in `opencode.json` ([opencode.md](opencode.md#options)).
 
 | Option | Default | Description |
 | --- | --- | --- |
 | `display` | `statusline` | Where the run's progress shows: `statusline`, `panel`, `off` ([status-line.md](status-line.md)) |
+| `backend` | `auto` | Where new pane workers start: `auto`, `herdr`, `hc` ([Where workers run](#where-workers-run-herdr-or-herdr-core)) |
 | `wakeOnSettle` | on | Wake the lead when a wave settles or a worker needs it |
 | `notifyHuman` | on | Also send you a herdr notification |
 | `autoContinue` | off | When the run isn't finished and no worker is busy, prompt the lead to keep going |
 | `autoContinueMax` | 3 | Most auto-continues in a row (any prompt you type resets it) |
-| `verbose` | off | Show omh_* tool calls and results in full; off shows one line each (ctrl+o expands) |
+| `verbose` | off | Show omh_* tool calls and results in full; off shows one line each (ctrl+o expands). Claude Code only: opencode draws its own tool rows |
 
 With [prismantis](https://github.com/NahumLitvin/prismantis) installed, `/omh plan` previews
 plan.md in a Claude Code pane drawn in color, and an expanded worker report or result with tables

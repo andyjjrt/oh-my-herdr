@@ -1,7 +1,7 @@
 # Status line
 
 While a run is open, the mod shows its progress (`omh ██░░░░ 2/5`, `⚠1` while a task needs you)
-where the `display` option (in `/plugin`) says:
+where the `display` option (in `/plugin`; in opencode, in `opencode.json`) says:
 
 - **`statusline`** (default): at the end of Claude Code's own hint line under the prompt, e.g.
   `⏵⏵ auto mode on · esc to interrupt · omh ██░░░░ 2/5`. Claude Code keeps drawing the rest.
@@ -9,6 +9,10 @@ where the `display` option (in `/plugin`) says:
 - **`off`**: neither.
 
 `/omh board` opens the whole board in a pane: every wave, task, worker and quota.
+
+In opencode the same option is read from `opencode.json` and the TUI draws the line; its board and
+`plan.md` open in a panel ([opencode.md](opencode.md#options)). `.omh/status.json` below is written
+by both hosts.
 
 ## Your own status line
 

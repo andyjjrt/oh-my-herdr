@@ -1,8 +1,8 @@
 # oh-my-herdr
 
-Let Claude Code act as the **lead** and split a big job across several agents and models: workers
-in [herdr](https://herdr.dev) panes and Claude Code subagents, each picked per task by category and
-remaining quota. Inspired by [OmO (oh-my-openagent)](https://omo.dev).
+Let a coding agent act as the **lead** — Claude Code or opencode — and split a big job across
+several agents and models: workers in [herdr](https://herdr.dev) panes and host subagents, each
+picked per task by category and remaining quota. Inspired by [OmO (oh-my-openagent)](https://omo.dev).
 
 In one line: **type `/ulw <goal>`, and the lead plans, dispatches, waits and verifies; you approve
 the plan and watch the progress bar.**
@@ -14,6 +14,32 @@ flowchart LR
   W -.->|panes · subagents| X[workers]
   X -.->|wake the lead| V
 ```
+
+## Hosts
+
+One core runs from two hosts:
+
+| Host | Ships as | Setup |
+| --- | --- | --- |
+| Claude Code | `claudecode/`, the marketplace plugin | [Quick start](#quick-start) below |
+| opencode 2.4.2 or newer | `opencode/`, packaged as `oh-my-herdr-opencode` | below and [docs/opencode.md](docs/opencode.md) |
+
+For opencode, add the plugin to the project's `opencode.json`:
+
+```json
+{
+  "plugins": [
+    {
+      "package": "/path/to/oh-my-herdr/opencode",
+      "options": { "display": "statusline" }
+    }
+  ]
+}
+```
+
+Point `package` at your checkout for now; the npm package is not published yet. Run `bun install`
+in `opencode/` once, then start `opencode` inside a herdr pane. The session that runs `/ulw`
+becomes the lead, and `/omh` answers the same subcommands. Workers still run in herdr panes.
 
 ## Quick start
 
@@ -73,13 +99,16 @@ senpi                            # then /login → OpenCode Go
 You can also just ask: "ulw", "split this across several agents" or "use herdr to parallelize this"
 loads the same workflow.
 
+The same commands exist in opencode. Its TUI answers the read-only `/omh` subcommands immediately;
+[docs/opencode.md](docs/opencode.md#the-tui) lists the differences.
+
 ## What it adds on top of herdr
 
 - **Plan first, waves second.** The lead writes the plan in prose and stops until you approve it;
   only then does it split it into waves of tasks that own disjoint files, with a gate after each.
 - **Panes and subagents, side by side.** A task goes to a herdr pane (any agent, any provider) or to
-  a Claude Code subagent of the lead (no pane, no startup wait), as its category's profiles say.
-  Both are watched, diagnosed and reported alike.
+  a subagent of the lead (a Claude Code subagent, or an opt-in opencode child session; no pane, no
+  startup wait), as its category's profiles say. Both are watched, diagnosed and reported alike.
 - **Explore before planning.** Read-only *scouts* fan out while the lead plans; it is woken when
   they are all back.
 - **Model per task, quota first.** Every dispatch states an intent, a category and why; routing
@@ -89,7 +118,8 @@ loads the same workflow.
   wave settles or a worker needs it, with a diagnosis (`quota-exhausted`, `permission-prompt`,
   `config-error`, `crashed`, `interrupted`).
 - **Visible progress.** A bar in the hint line under the prompt (or a row above it, or your own
-  status line), and the full board in a pane.
+  status line), and the full board in a pane. In opencode the TUI draws the same line, the board and
+  plan.md.
 - **A quality log.** Each verified task's one-line quality note, profile and duration go to
   `~/.local/state/oh-my-herdr/history.jsonl`, for judging which profile suits which work.
 
@@ -97,7 +127,8 @@ loads the same workflow.
 
 | Doc | For |
 | --- | --- |
-| [Configuration](docs/configuration.md) | Profiles, categories, pane vs subagent workers, worker tabs, agents, mod options |
+| [Configuration](docs/configuration.md) | Profiles, categories, pane vs subagent workers, worker tabs, agents, options |
+| [opencode](docs/opencode.md) | The opencode host: install, options, differences, `oc-subagent` |
 | [Quota](docs/quota.md) | How quota is read and used, and adding a provider of your own |
 | [Status line](docs/status-line.md) | Where progress shows, and adding it to your own status line |
 | [Architecture](docs/architecture.md) | The pieces, one run, the worker state machine, guards, `.omh/` |
@@ -117,17 +148,19 @@ remove that copy so it doesn't load twice.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| The lead has no `omh_dispatch` tool | The mod only starts in a lead inside a herdr pane (`HERDR_ENV=1`): start `herdr`, run `claude` in a pane |
+| The lead has no `omh_*` tools (Claude Code) | The mod only starts in a lead inside a herdr pane (`HERDR_ENV=1`): start `herdr`, run `claude` in a pane |
+| The lead has no `omh_*` tools (opencode) | The plugin is not loaded: add it to `opencode.json` `plugins` (opencode 2.4.2 or newer), and start `opencode` without `OMH_ROLE=worker` |
 | A Claude worker waits at "Is this a project you created or one you trust?" | That folder isn't trusted yet: accept it once in that pane |
 | `config-error` | A wrong model id, a missing login or API key; re-dispatching fails the same way. Fix the config, confirm with `/omh check` |
 | `quota-exhausted` or `no-profile` | A subscription ran out; the lead re-dispatches elsewhere. If all are out, `/omh quota` shows when each resets |
-| A subagent worker is `blocked` | It waits on a permission prompt in the lead's session |
+| A subagent worker is `blocked` (Claude Code) | It waits on a permission prompt in the lead's session |
 | Two workers edited the same file | The plan's `owns` was wrong: `/omh teardown`, and ask the lead to re-plan |
 
 ## Development
 
 ```sh
 bun scripts/sync.ts --check                     # claudecode/core and claudecode/skills must match
+bun test core/ opencode/                        # portable core and opencode adapter tests
 claude --plugin-dir ~/codes/github/oh-my-herdr/claudecode   # or add that path to CLAUDE_CODE_PLUGIN_DIRS
 claude plugin validate claudecode
 claude plugin test claudecode
