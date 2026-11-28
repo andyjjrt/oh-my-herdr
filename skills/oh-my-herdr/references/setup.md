@@ -20,8 +20,10 @@ claude                                                   # log in once with your
 /plugin marketplace add <owner>/oh-my-herdr              # inside Claude Code
 /plugin install oh-my-herdr@oh-my-herdr
 ```
-While developing the plugin itself: `claude --plugin-dir <repo>`, or put the repo path in
-`CLAUDE_CODE_PLUGIN_DIRS` (the `env` block of `~/.claude/settings.json`).
+While developing the plugin itself: `claude --plugin-dir <repo>/claudecode`, or put that path in
+`CLAUDE_CODE_PLUGIN_DIRS` (the `env` block of `~/.claude/settings.json`). Run
+`bun scripts/sync.ts --check` first so `claudecode/core` and `claudecode/skills` match their
+sources.
 
 Claude Code workers ask "Is this a project you created or one you trust?" the first time they open
 a folder. Accept it once for each project you orchestrate in, or the worker stays blocked.
@@ -102,7 +104,7 @@ Shape:
 ```
 - `herdr-kind` → `herdr agent start <name> --kind <kind> --pane <pane> -- <args>`.
 - `command` → runs `env HERDR_AGENT=<detect_as> OMH_ROLE=worker [env…] <command> <args>` in the pane, waits until herdr detects the agent, then names it. For forks and wrappers herdr doesn't know.
-- `subagent` → no pane: the lead starts a Claude Code subagent (`$.agent.spawn`) with the task's brief, watches it through `$.agent.list()` and its end, and saves its final reply as result.md. It starts at once and costs no pane, but runs only Claude models on the lead's own quota and permissions, can't be looked at or typed into like a pane, isn't reused for a second task, and ends with the lead's session. `omh_spawn` can't start one ahead of time; it starts with its dispatch. Good for `explore`, `quick` and read-only reviews; keep long implementation and other providers in panes.
+- `subagent` → no pane: the lead starts a Claude Code subagent (`$.subagent.spawn`) with the task's brief, watches it through `$.subagent.list()` and its end, and saves its final reply as result.md. It starts at once and costs no pane, but runs only Claude models on the lead's own quota and permissions, can't be looked at or typed into like a pane, isn't reused for a second task, and ends with the lead's session. `omh_spawn` can't start one ahead of time; it starts with its dispatch. Good for `explore`, `quick` and read-only reviews; keep long implementation and other providers in panes.
 - `stall_seconds` (default 30): how long after a dispatch the worker may take to start working before it counts as stalled.
 - `diagnose`: extra screen patterns (regular expressions) per verdict — `quota-exhausted`, `permission-prompt`, `config-error`, `crashed`, `interrupted` — added to the built-in ones. When the lead is told a worker stopped with `unknown`, the screen excerpt is what to turn into a new pattern here.
 

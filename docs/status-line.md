@@ -19,7 +19,7 @@ Whatever `display` says, the mod writes the run's progress to `.omh/status.json`
 this to Claude Code (then you may set `display` to `off`):
 
 > Add the oh-my-herdr run progress to my status line. Find where the oh-my-herdr plugin is
-> installed and call its `statusline/omh-wave` with the status line input's
+> installed and call its `claudecode/statusline/omh-wave` with the status line input's
 > `workspace.project_dir` as the argument; it prints a short progress line, or nothing when no run
 > is open. Append that output to my current status line after the folder and branch, separated by
 > ` · `. If I have no status line yet, make one: model with context %, folder, git branch, and that
@@ -32,7 +32,7 @@ workers finishing while the lead is idle wouldn't show.
 
 `.omh/status.json` is a summary: the top-level fields are the unbound session's run, and `runs`
 lists every active run. A bound lead writes its own `.omh/runs/<run>/status.json` instead.
-`statusline/omh-wave` picks its run by `runs/*/lead.json`: the newest not-closed run whose `root`
+`claudecode/statusline/omh-wave` picks its run by `runs/*/lead.json`: the newest not-closed run whose `root`
 equals the current git toplevel, in the main checkout or in a worktree you made, so each lead's
 line shows its own run. When none matches it falls back to the summary. A finished run's status
 file is removed, so it falls back to the summary too. Two leads in one checkout both show the most
@@ -41,7 +41,7 @@ one line per active run (`<id> <state> <done>/<total> <goal>`, needs `jq`). `OMH
 
 ## The API
 
-- `statusline/omh-wave [dir]` prints the ready line (`██░░░░ 2/5`, then `⚠1` while a task needs
+- `claudecode/statusline/omh-wave [dir]` prints the ready line (`██░░░░ 2/5`, then `⚠1` while a task needs
   you), or nothing when no run is open. It reads the nearest `.omh/status.json` at or above `dir`.
   `--field <name>` prints one field; `--json` the whole file. It always exits 0.
 - `.omh/status.json` fields: `version` (1), `run`, `goal`, `wave`, `waves`, `done`, `total`,

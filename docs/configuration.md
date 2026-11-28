@@ -188,7 +188,7 @@ only record state (`close` needs `force` for an unfinished run) and never touch 
 | --- | --- |
 | `herdr-kind` | `herdr agent start <name> --kind <kind> --pane <pane> -- <args>` |
 | `command` | running `<command> <args>` in the pane with `HERDR_AGENT=<detect_as>`, then naming the agent herdr detects. For forks and wrappers herdr doesn't know |
-| `subagent` | `$.agent.spawn` in the lead's session: no pane |
+| `subagent` | `$.subagent.spawn` in the lead's session: no pane |
 
 `reports`, `min_version` and `version_cmd` say whether an agent can report its status to the backend:
 

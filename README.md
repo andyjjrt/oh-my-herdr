@@ -127,9 +127,10 @@ remove that copy so it doesn't load twice.
 ## Development
 
 ```sh
-claude --plugin-dir ~/codes/github/oh-my-herdr   # or add the path to CLAUDE_CODE_PLUGIN_DIRS
-claude plugin validate .
-claude plugin test .
+bun scripts/sync.ts --check                     # claudecode/core and claudecode/skills must match
+claude --plugin-dir ~/codes/github/oh-my-herdr/claudecode   # or add that path to CLAUDE_CODE_PLUGIN_DIRS
+claude plugin validate claudecode
+claude plugin test claudecode
 ```
 
 ## License

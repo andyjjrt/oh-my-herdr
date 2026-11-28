@@ -1,6 +1,6 @@
 # Architecture
 
-oh-my-herdr is a Claude Code **mod** (`hooks/`) plus a **skill** (`skills/oh-my-herdr/`). The skill
+oh-my-herdr is a Claude Code **mod** (`claudecode/`) plus a **skill** (`skills/oh-my-herdr/`). The skill
 teaches the lead the workflow; the mod does the bookkeeping: it gives the lead its `omh_*` tools,
 starts and watches workers, and wakes the lead when there is something to do. The files under
 `.omh/` are the source of truth; the mod's in-memory state is rebuilt from them after a reload.
@@ -12,8 +12,8 @@ flowchart TB
   user([You]) -->|/ulw, /omh| lead
   subgraph cc["Claude Code (the lead's pane)"]
     lead["Lead model<br/>skill: oh-my-herdr"]
-    mod["oh-my-herdr mod<br/>hooks/register.tsx"]
-    sub["Subagent workers<br/>$.agent.spawn"]
+    mod["oh-my-herdr mod<br/>claudecode/hooks/register.tsx"]
+    sub["Subagent workers<br/>$.subagent.spawn"]
     lead -->|omh_dispatch · omh_status · omh_collect| mod
     mod -->|wake-up prompt| lead
     mod -->|spawn| sub
@@ -31,18 +31,18 @@ flowchart TB
 
 | Module | Does |
 | --- | --- |
-| `hooks/register.tsx` | Wiring only: tools, commands, render sites, guards. Dormant outside herdr and in worker panes (`OMH_ROLE=worker`) |
-| `hooks/lib/actions.ts` | What each tool and command does: dispatch, spawn, collect, status, check, teardown |
-| `hooks/lib/runtime.ts` | The live side: watchers, timers, alerts, wake-ups, quota refresh, reconcile after a reload |
-| `hooks/lib/settle.ts` | The worker state machine (pure) |
-| `hooks/lib/route.ts` · `quota.ts` | Category → profile, skipping providers out of quota ([quota.md](quota.md)) |
-| `hooks/lib/subagent.ts` | Subagent workers: status mapping, the report contract |
-| `hooks/lib/backend.ts` | Pane workers in herdr or herdr-core: picks where new ones start, routes each call by its pane id |
-| `hooks/lib/herdr.ts` · `hc.ts` | The herdr and `hc` CLIs; `hc:<address>` is an hc worker's pane id |
-| `hooks/lib/layout.ts` | Where the next herdr pane worker goes: tabs and splits |
-| `hooks/lib/diagnose.ts` | Why a worker stopped, from its screen (or a subagent's answer) |
-| `hooks/lib/plan.ts` · `files.ts` | The plan, task status, and the `.omh/` layout |
-| `hooks/lib/text.ts` · `md.ts` | What the lead and you read: wake-ups, status, tables |
+| `claudecode/hooks/register.tsx` | Claude Code wiring: tools, commands, render sites, guards. Dormant outside herdr and in worker panes (`OMH_ROLE=worker`) |
+| `core/actions.ts` | What each tool and command does: dispatch, spawn, collect, status, check, teardown |
+| `core/runtime.ts` | The live side: watchers, timers, alerts, wake-ups, quota refresh, reconcile after a reload |
+| `core/settle.ts` | The worker state machine (pure) |
+| `core/route.ts` · `core/quota.ts` | Category → profile, skipping providers out of quota ([quota.md](quota.md)) |
+| `core/subagent.ts` | Subagent workers: status mapping, the report contract |
+| `core/backend.ts` | Pane workers in herdr or herdr-core: picks where new ones start, routes each call by its pane id |
+| `core/herdr.ts` · `core/hc.ts` | The herdr and `hc` CLIs; `hc:<address>` is an hc worker's pane id |
+| `core/layout.ts` | Where the next herdr pane worker goes: tabs and splits |
+| `core/diagnose.ts` | Why a worker stopped, from its screen (or a subagent's answer) |
+| `core/plan.ts` · `core/files.ts` | The plan, task status, and the `.omh/` layout |
+| `core/text.ts` · `core/md.ts` | What the lead and you read: wake-ups, status, tables |
 
 ## One run
 
@@ -126,7 +126,7 @@ so a lead in a worktree and a lead in the main checkout share it. `OMH_DIR` over
 ## Several leads, one .omh
 
 Every lead of a project reads and writes the same `.omh/`, including `agents/`. What is *this*
-session's is decided by one predicate, `ownsWorker(w, p, sessionRun, lead)` in `hooks/lib/files.ts`.
+session's is decided by one predicate, `ownsWorker(w, p, sessionRun, lead)` in `core/files.ts`.
 
 Every worker file written by `spawn`, `startSubagent` and `dispatch` records `lead`: the session's
 identity from `leadId()` in `runtime.ts` (its herdr pane, else `hc:<terminal>`). A file with `lead`
@@ -172,7 +172,7 @@ flowchart LR
   D[omh_dispatch] --> G{"Intent Gate<br/>intent · category · why"}
   G --> R["route: category's profiles in order<br/>skip out of quota, avoid reviewed family"]
   R -->|pane profile| P["free worker on that profile,<br/>else a new pane (layout.ts)"]
-  R -->|subagent profile| S["$.agent.spawn<br/>one per task"]
+  R -->|subagent profile| S["$.subagent.spawn<br/>one per task"]
   P --> B["brief.md: preamble + brief<br/>+ files owned + report contract"]
   S --> B
 ```
@@ -183,7 +183,7 @@ open in `omh-workers` tabs in the lead's workspace, at most `max_panes_per_tab` 
 
 ## A worker's life
 
-The same state machine (`hooks/lib/settle.ts`) follows pane workers and subagent workers; only
+The same state machine (`core/settle.ts`) follows pane workers and subagent workers; only
 where the status comes from differs.
 
 ```mermaid
@@ -208,7 +208,7 @@ stateDiagram-v2
 
 | | Pane worker | Subagent worker |
 | --- | --- | --- |
-| Status from | herdr's event stream, or `hc events` for an hc worker (`scripts/omh-watch.py`) | `$.agent.list()` every 10 s |
+| Status from | herdr's event stream, or `hc events` for an hc worker (`scripts/omh-watch.py`) | `$.subagent.list()` every 10 s |
 | End | idle or done on screen | its `turn.complete` |
 | Report | writes `result.md`, replies `DONE <path>` | its final reply, saved as `result.md` by the mod |
 | Diagnosis reads | the pane's screen | its status, end reason and answer |

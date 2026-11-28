@@ -2,5 +2,5 @@
   "name": "oh-my-herdr",
   "description": "OmO-style multi-agent orchestration on herdr for Claude Code.",
   "owner": { "name": "andyjjrt" },
-  "plugins": [{ "name": "oh-my-herdr", "source": "./" }]
+  "plugins": [{ "name": "oh-my-herdr", "source": "./claudecode" }]
 }
